@@ -20,6 +20,7 @@ import {
 import type { LobbyState } from './session';
 import type { Session } from './session';
 import { ageName, civName, englishText, gameName, LABELS, mapSizeName, mapTypeName, pathFindingName, resourcesName, summaryLines, timeLimitName, victoryName, type Text } from './setting-text';
+import { AiBot } from '../bot/ai-bot';
 
 const ERROR_TEXT: Record<string, string> = {
   'bad-code': 'No game with that invite code.',
@@ -68,6 +69,8 @@ export class LobbyView {
   readonly root = el('section', { id: 'lobby', testid: 'lobby' });
   private name = 'Player';
   private text: Text = englishText;
+  private bot: AiBot | null = null;
+  private autoSinglePlayer = false;
   /** The room's chat, kept across redraws: the box of lines and the input. */
   private readonly chatLog = el('div', { className: 'chat-log', testid: 'lobby-chat' });
   private readonly chatInput = el('input', { maxLength: CHAT_LENGTH, testid: 'lobby-chat-input', ariaLabel: 'Chat', autocomplete: 'off' });
@@ -99,6 +102,32 @@ export class LobbyView {
     // A new setup screen starts with an empty chat (`chat->ClearChat()`, src/scr_mps.cpp:52).
     if (state.phase === 'lobby' && !this.inRoom) this.chatLog.replaceChildren();
     this.inRoom = state.phase === 'lobby';
+
+    if (state.phase === 'ended') {
+      if (this.bot) {
+        this.bot.destroy();
+        this.bot = null;
+      }
+      this.autoSinglePlayer = false;
+    }
+
+    if (state.phase === 'lobby' && this.autoSinglePlayer) {
+      if (!this.bot && state.players.length === 1) {
+        AiBot.spawn(state.code, 'Computer (Hard)', Math.floor(Math.random() * 16) + 1).then((b) => {
+          this.bot = b;
+        });
+      }
+      const me = state.players.find((p) => p.slot === state.you);
+      if (me && !me.ready) {
+        this.session.setReady(true);
+      }
+      const everyoneReady = state.players.length === 2 && state.players.every((p) => p.ready);
+      if (everyoneReady && state.you === 0) {
+        this.autoSinglePlayer = false;
+        setTimeout(() => this.session.start(), 300);
+      }
+    }
+
     // The chat moves into the new panel; typing in it goes on.
     const typing = document.activeElement === this.chatInput;
     this.root.replaceChildren(state.phase === 'lobby' ? this.room(state) : this.entry(state));
@@ -115,20 +144,52 @@ export class LobbyView {
   }
 
   private entry(state: LobbyState): HTMLElement {
+    const singlePlayerBtn = el(
+      'button',
+      { testid: 'single-player', className: 'primary' },
+      '⚔️ Chơi Đơn Với Máy (Single Player vs AI)',
+    );
+    singlePlayerBtn.style.width = '100%';
+    singlePlayerBtn.style.padding = '0.9rem';
+    singlePlayerBtn.style.fontSize = '1.15rem';
+    singlePlayerBtn.style.marginBottom = '1.2rem';
+    singlePlayerBtn.style.background = 'linear-gradient(180deg, #947a32 0%, #d4af37 50%, #7d6322 100%)';
+    singlePlayerBtn.style.color = '#fffbe8';
+    singlePlayerBtn.style.border = '2px solid #ffe57f';
+    singlePlayerBtn.style.boxShadow = '0 0 15px rgba(212, 175, 55, 0.4)';
+    singlePlayerBtn.addEventListener('click', () => {
+      this.autoSinglePlayer = true;
+      this.session.create(this.name);
+    });
+
     const name = el('input', { value: this.name, maxLength: 24, testid: 'name', ariaLabel: 'Your name', placeholder: 'Your name' });
     name.addEventListener('input', () => (this.name = name.value.trim() || 'Player'));
     const code = el('input', { maxLength: 12, placeholder: 'Invite code', testid: 'code', ariaLabel: 'Invite code' });
-    const create = el('button', { testid: 'create', className: 'primary' }, 'Create game');
+    const create = el('button', { testid: 'create' }, 'Tạo phòng (Create)');
     create.addEventListener('click', () => this.session.create(this.name));
-    const join = el('button', { testid: 'join' }, 'Join game');
+    const join = el('button', { testid: 'join' }, 'Vào phòng (Join)');
     join.addEventListener('click', () => this.session.join(code.value, this.name));
+
+    const skirmish = el('button', { testid: 'skirmish-btn' }, '💥 Hỗn Chiến (Skirmish)');
+    skirmish.addEventListener('click', () => {
+      location.href = '/?debug=combat';
+    });
+
+    const map = el('button', { testid: 'map-btn' }, '🗺️ Bản Đồ (Map View)');
+    map.addEventListener('click', () => {
+      location.href = '/?debug=map';
+    });
+
     const box = el(
       'div',
       { className: 'panel' },
-      el('h2', {}, 'Multiplayer'),
-      el('label', {}, 'Your name', name),
+      el('h2', {}, 'Age of Empires: Rise of Rome'),
+      singlePlayerBtn,
+      el('div', { className: 'row', style: 'margin-bottom: 1.2rem;' }, skirmish, map),
+      el('h3', { style: 'margin: 0.5rem 0 0.8rem; text-align: center; font-size: 1.1rem; color: #5a4a32;' }, '── Nhiều Người Chơi (Multiplayer) ──'),
+      el('label', {}, 'Tên người chơi (Player Name)', name),
       el('div', { className: 'row' }, create),
-      el('p', { className: 'or' }, 'or join a friend with their invite code'),
+      el('p', { className: 'or' }, 'hoặc nhập mã phòng để vào chơi cùng bạn bè'),
       el('div', { className: 'row' }, code, join),
     );
     if (state.phase === 'ended') box.append(el('p', { className: 'note', testid: 'ended' }, 'The game ended.'));
@@ -149,11 +210,30 @@ export class LobbyView {
           : el('span', { className: 'civ', testid: `civ-${p.slot}` }, civName(this.text, p.civ));
       list.append(el('li', { testid: `player-${p.slot}` }, `${p.name}${p.slot === 0 ? ' (host)' : ''} - ${p.ready ? 'ready' : 'not ready'} `, civ));
     }
-    if (state.players.length < 2) list.append(el('li', {}, 'Waiting for a second player...'));
+    if (state.players.length < 2) {
+      list.append(el('li', {}, 'Waiting for a second player...'));
+      if (host && !this.bot) {
+        const addBot = el('button', { testid: 'add-bot-btn', className: 'primary' }, '🤖 Thêm Máy (Add AI Bot)');
+        addBot.addEventListener('click', () => {
+          if (!this.bot) {
+            AiBot.spawn(state.code, 'Computer (Hard)', Math.floor(Math.random() * 16) + 1).then((b) => {
+              this.bot = b;
+            });
+          }
+        });
+        list.append(el('li', { style: 'margin-top: 0.5rem; list-style: none;' }, addBot));
+      }
+    }
     const ready = el('button', { testid: 'ready', className: 'primary' }, me?.ready ? 'Not ready' : 'Ready');
     ready.addEventListener('click', () => this.session.setReady(!me?.ready));
     const leave = el('button', { testid: 'leave' }, 'Leave');
-    leave.addEventListener('click', () => this.session.leave());
+    leave.addEventListener('click', () => {
+      if (this.bot) {
+        this.bot.destroy();
+        this.bot = null;
+      }
+      this.session.leave();
+    });
     const box = el(
       'div',
       { className: 'panel' },

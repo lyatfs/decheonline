@@ -1,1 +1,1 @@
-export const GAME_TITLE = 'AoE1 Web';
+export const GAME_TITLE = 'Age of Empires: Rise of Rome';

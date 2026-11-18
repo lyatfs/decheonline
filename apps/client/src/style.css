@@ -16,7 +16,7 @@ body {
   min-height: 100%;
   background: #000;
   color: var(--parchment);
-  font-family: Georgia, 'Palatino Linotype', Palatino, serif;
+  font-family: 'Segoe UI', Tahoma, Arial, Georgia, 'Palatino Linotype', serif;
 }
 
 /* The lobby scrolls when the window is smaller than its content; the game screen never does. */
@@ -117,7 +117,9 @@ header h1 {
 button,
 #lobby button {
   padding: 0.55rem 1rem;
-  font: bold 1rem Georgia, 'Palatino Linotype', Palatino, serif;
+  font-family: inherit;
+  font-weight: bold;
+  font-size: 1rem;
   letter-spacing: 0.04em;
   color: var(--gold);
   cursor: pointer;
@@ -244,7 +246,7 @@ dialog {
   background: linear-gradient(180deg, #e2d1a6 0%, var(--parchment-dark) 100%);
   border: 6px solid var(--stone);
   border-color: var(--stone-light) var(--stone-dark) var(--stone-dark) var(--stone-light);
-  font-family: Georgia, 'Palatino Linotype', Palatino, serif;
+  font-family: 'Segoe UI', Tahoma, Arial, Georgia, 'Palatino Linotype', serif;
 }
 dialog::backdrop {
   background: rgba(0, 0, 0, 0.6);
