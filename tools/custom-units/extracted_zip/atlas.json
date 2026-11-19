@@ -1,0 +1,136 @@
+{
+  "format": "PNG RGBA",
+  "source_image_size": {
+    "width": 1536,
+    "height": 1024
+  },
+  "frame_size": {
+    "width": 192,
+    "height": 205
+  },
+  "layout": "8 columns x 5 rows",
+  "frame_count": 40,
+  "note": "8 direction samples for idle (row 1). Movement, attacks and death sequences currently only show one principal orientation. Frame pivots and collision boxes should be checked in engine.",
+  "animations": {
+    "idle_directions": {
+      "frame_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "loop": true,
+      "suggested_fps": 1,
+      "files": [
+        "idle_directions/idle_directions_00.png",
+        "idle_directions/idle_directions_01.png",
+        "idle_directions/idle_directions_02.png",
+        "idle_directions/idle_directions_03.png",
+        "idle_directions/idle_directions_04.png",
+        "idle_directions/idle_directions_05.png",
+        "idle_directions/idle_directions_06.png",
+        "idle_directions/idle_directions_07.png"
+      ]
+    },
+    "move_east": {
+      "frame_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "loop": true,
+      "suggested_fps": 9,
+      "files": [
+        "move_east/move_east_00.png",
+        "move_east/move_east_01.png",
+        "move_east/move_east_02.png",
+        "move_east/move_east_03.png",
+        "move_east/move_east_04.png",
+        "move_east/move_east_05.png",
+        "move_east/move_east_06.png",
+        "move_east/move_east_07.png"
+      ]
+    },
+    "attack_thrust_east": {
+      "frame_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "loop": true,
+      "suggested_fps": 11,
+      "files": [
+        "attack_thrust_east/attack_thrust_east_00.png",
+        "attack_thrust_east/attack_thrust_east_01.png",
+        "attack_thrust_east/attack_thrust_east_02.png",
+        "attack_thrust_east/attack_thrust_east_03.png",
+        "attack_thrust_east/attack_thrust_east_04.png",
+        "attack_thrust_east/attack_thrust_east_05.png",
+        "attack_thrust_east/attack_thrust_east_06.png",
+        "attack_thrust_east/attack_thrust_east_07.png"
+      ]
+    },
+    "attack_sweep_east": {
+      "frame_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "loop": true,
+      "suggested_fps": 10,
+      "files": [
+        "attack_sweep_east/attack_sweep_east_00.png",
+        "attack_sweep_east/attack_sweep_east_01.png",
+        "attack_sweep_east/attack_sweep_east_02.png",
+        "attack_sweep_east/attack_sweep_east_03.png",
+        "attack_sweep_east/attack_sweep_east_04.png",
+        "attack_sweep_east/attack_sweep_east_05.png",
+        "attack_sweep_east/attack_sweep_east_06.png",
+        "attack_sweep_east/attack_sweep_east_07.png"
+      ]
+    },
+    "death_east": {
+      "frame_indices": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "loop": false,
+      "suggested_fps": 8,
+      "files": [
+        "death_east/death_east_00.png",
+        "death_east/death_east_01.png",
+        "death_east/death_east_02.png",
+        "death_east/death_east_03.png",
+        "death_east/death_east_04.png",
+        "death_east/death_east_05.png",
+        "death_east/death_east_06.png",
+        "death_east/death_east_07.png"
+      ]
+    }
+  }
+}
