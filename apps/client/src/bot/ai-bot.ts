@@ -245,14 +245,14 @@ export class AiBot {
     if (unbuiltBuildings.length > 0 && villagers.length > 0) {
       const b = unbuiltBuildings[0]!;
       // Assign an idle villager to assist building
-      const idleVillager = villagers.find((v) => !v.mover?.moving);
+      const idleVillager = villagers.find((v) => !v.work && !v.attack && (v.mover?.path?.length ?? 0) === 0);
       if (idleVillager) {
         this.issue({ type: 'work', units: [idleVillager.id], target: b.id, x: b.x, y: b.y });
       }
     }
 
     // Assign idle villagers to food, wood, gold, stone
-    const idleVillagers = villagers.filter((v) => !v.mover?.moving);
+    const idleVillagers = villagers.filter((v) => !v.work && !v.attack && (v.mover?.path?.length ?? 0) === 0);
     if (idleVillagers.length > 0) {
       const allObjects = [...world.entities.all()].filter((e) => e.state === ObjectState.Active);
       const berries = allObjects.filter((e) => e.owner === 0 && e.type === FORAGE);

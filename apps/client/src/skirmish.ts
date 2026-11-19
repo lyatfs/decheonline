@@ -4,10 +4,11 @@ import { createAssetProvider } from './assets';
 import { exposeMapDebug, MapView } from './map';
 import { UnitLayer } from './units/unit-layer';
 
-// Master ids (empires.dat): Bowman, Clubman, Villager.
+// Master ids (empires.dat): Bowman, Clubman, Villager, Asian Spearman.
 const BOWMAN = 4;
 const CLUBMAN = 73;
 const VILLAGER = 83;
+const ASIAN_SPEARMAN = 400;
 /** Where the fight is, between the two bases. */
 const MIDDLE = { x: 20, y: 20 };
 
@@ -41,6 +42,8 @@ export async function startSkirmish(app: Application, speed: number): Promise<Sk
   const fighters = [
     ...[0, 1, 2, 3].map((i) => at(1, BOWMAN, -3.5, -1.5 + i)),
     at(1, CLUBMAN, -2.5, 0.5),
+    at(1, ASIAN_SPEARMAN, -2.0, -0.8),
+    at(1, ASIAN_SPEARMAN, -2.0, 1.8),
     ...[0, 1, 2].map((i) => at(2, VILLAGER, 2.5, -1.5 + i * 1.5)),
     at(2, CLUBMAN, 3.5, -0.5),
     at(2, CLUBMAN, 3.5, 1.5),
@@ -50,7 +53,10 @@ export async function startSkirmish(app: Application, speed: number): Promise<Sk
   const ids = (owner: number, type: number) => [...world.entities.ofPlayer(owner)].filter((e) => e.type === type).map((e) => e.id);
   const villagers = ids(2, VILLAGER).filter((id) => world.entities.get(id)!.x > MIDDLE.x);
   const bowmen = ids(1, BOWMAN);
-  world.addBatch(0, 1, [{ type: 'attack', units: bowmen, target: villagers[0]! }]);
+  world.addBatch(0, 1, [
+    { type: 'attack', units: bowmen, target: villagers[0]! },
+    { type: 'attack', units: ids(1, ASIAN_SPEARMAN), target: villagers[1] ?? villagers[0]! },
+  ]);
   world.addBatch(0, 2, [{ type: 'attack', units: ids(2, CLUBMAN), target: bowmen[0]! }]);
 
   const provider = await createAssetProvider();

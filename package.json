@@ -21,6 +21,7 @@
     "dat:dump": "node --experimental-transform-types tools/dat-dump.mjs",
     "gen:sim-tables": "node --experimental-transform-types tools/gen-sim-tables.mjs",
     "assets:import": "npm run import -w @aoe/assets-import",
+    "assets:custom-units": "node tools/custom-units/pack_asian_spearman.cjs",
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",

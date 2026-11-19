@@ -242,6 +242,7 @@ export const STABLE = 101;
 export const SMALL_WALL = 72;
 export const WATCH_TOWER = 79;
 export const SLINGER = 347;
+export const ASIAN_SPEARMAN = 400;
 export const FARM = 50;
 export const BUILDER = 118;
 export const LUMBERJACK = 123;

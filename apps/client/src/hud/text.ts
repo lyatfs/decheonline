@@ -101,6 +101,7 @@ export interface StatRow {
  * player's master, names what it is a copy of.
  */
 export function objectName(provider: AssetProvider, unit: number, t: UnitType = unitType(unit)): string {
+  if (unit === 400 || t.name === 'Soldier-AsianSpear') return 'Trường Thương Binh';
   const id = infoOf(provider, t)?.nameId ?? 0;
   return (id >= 1 && provider.string(id)) || t.name;
 }

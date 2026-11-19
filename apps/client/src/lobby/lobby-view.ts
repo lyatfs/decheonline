@@ -30,11 +30,12 @@ const ERROR_TEXT: Record<string, string> = {
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
-  props: Partial<HTMLElementTagNameMap[K]> & { testid?: string } = {},
+  props: Partial<Omit<HTMLElementTagNameMap[K], 'style'>> & { testid?: string; style?: string } = {},
   ...children: (Node | string)[]
 ): HTMLElementTagNameMap[K] {
-  const { testid, ...rest } = props;
+  const { testid, style, ...rest } = props;
   const node = Object.assign(document.createElement(tag), rest);
+  if (style) node.style.cssText = style;
   if (testid) node.dataset.testid = testid;
   node.append(...children);
   return node;
