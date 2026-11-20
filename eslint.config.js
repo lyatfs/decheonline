@@ -14,7 +14,7 @@ const transcendentalMath = [
 
 export default tseslint.config(
   {
-    ignores: ['**/node_modules/', '**/dist/', 'assets-local/', '**/test-results/', '**/playwright-report/'],
+    ignores: ['**/node_modules/', '**/dist/', 'assets-local/', '**/test-results/', '**/playwright-report/', 'tools/**'],
   },
   js.configs.recommended,
   tseslint.configs.recommended,

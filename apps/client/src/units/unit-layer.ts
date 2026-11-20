@@ -303,6 +303,7 @@ export class UnitLayer {
   /** Each texture with every other pixel black, by the parity of its top-left screen pixel. */
   private readonly foggedTextures = new WeakMap<Texture, (Texture | null | undefined)[]>();
   private press: { x: number; y: number; boxing: boolean } | null = null;
+  private rightDrag: { startX: number; startY: number; clientX: number; clientY: number; dragged: boolean; pointerId: number } | null = null;
   /** Master id of the building being placed (`TRIBE_GAME_MODE_PLACE_BUILDING`), or null. */
   private placing: number | null = null;
   private readonly ghostSprite = new Sprite();
@@ -1230,11 +1231,34 @@ export class UnitLayer {
       // An order mode takes the next left click, or right click but in the Move mode (whose right click is a plain order).
       if (this.clickMode && (e.button === 0 || (e.button === 2 && this.clickMode !== 'move'))) return this.commandAt(this.clickMode, p.x, p.y);
       if (e.button === 0) this.press = { ...p, boxing: false };
-      else if (e.button === 2) this.orderAt(p.x, p.y);
+      else if (e.button === 2) {
+        this.rightDrag = {
+          startX: p.x,
+          startY: p.y,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          dragged: false,
+          pointerId: e.pointerId,
+        };
+        canvas.setPointerCapture(e.pointerId);
+      }
     });
     on('pointermove', (e) => {
       const p = local(e);
       this.pointer = p;
+      if (this.rightDrag && e.pointerId === this.rightDrag.pointerId) {
+        const dx = e.clientX - this.rightDrag.clientX;
+        const dy = e.clientY - this.rightDrag.clientY;
+        const totalDist = Math.hypot(p.x - this.rightDrag.startX, p.y - this.rightDrag.startY);
+        if (this.rightDrag.dragged || totalDist >= 5) {
+          this.rightDrag.dragged = true;
+          this.rightDrag.clientX = e.clientX;
+          this.rightDrag.clientY = e.clientY;
+          this.o.view.camera.moveTo(this.o.view.camera.x - dx, this.o.view.camera.y - dy);
+          canvas.style.cursor = 'grabbing';
+          return;
+        }
+      }
       if (this.placing !== null) {
         // A right press during the drag (a chorded button, which comes as a move) stops placing, as a right click does.
         if (this.wallDrag && e.buttons & 2) return this.cancelPlacement();
@@ -1284,6 +1308,20 @@ export class UnitLayer {
     window.addEventListener('keydown', onKey);
     this.cleanup.push(() => window.removeEventListener('keydown', onKey));
     on('pointerup', (e) => {
+      if (e.button === 2 && this.rightDrag) {
+        if (canvas.hasPointerCapture(e.pointerId)) {
+          canvas.releasePointerCapture(e.pointerId);
+        }
+        const wasDragged = this.rightDrag.dragged;
+        const startX = this.rightDrag.startX;
+        const startY = this.rightDrag.startY;
+        this.rightDrag = null;
+        canvas.style.cursor = '';
+        if (!wasDragged) {
+          this.orderAt(startX, startY);
+        }
+        return;
+      }
       if (e.button === 0 && this.wallDrag) return this.placeWall(e.shiftKey || e.ctrlKey);
       if (e.button !== 0 || !this.press) return;
       const p = local(e);
@@ -1293,6 +1331,15 @@ export class UnitLayer {
       } else this.clickAt(p.x, p.y, e.shiftKey || e.ctrlKey);
       this.press = null;
       this.box.clear();
+    });
+    on('pointercancel', (e) => {
+      if (this.rightDrag && e.pointerId === this.rightDrag.pointerId) {
+        if (canvas.hasPointerCapture(e.pointerId)) {
+          canvas.releasePointerCapture(e.pointerId);
+        }
+        this.rightDrag = null;
+        canvas.style.cursor = '';
+      }
     });
   }
 

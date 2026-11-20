@@ -317,9 +317,10 @@ dialog h2 {
 #resource-bar b,
 .hud-age,
 .hud-menu {
-  font-weight: normal;
+  font-weight: bold;
+  font-size: 13px;
   color: #000;
-  text-shadow: -1px 1px 0 #fff;
+  text-shadow: -1px 1px 0 #fff, 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff;
 }
 .hud:not(.art) #resource-bar b,
 .hud:not(.art) .hud-age,

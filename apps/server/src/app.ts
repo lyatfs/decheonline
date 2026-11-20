@@ -57,8 +57,13 @@ export function createApp({
       const decoded = isBinary
         ? ({ ok: false, error: 'binary frames not supported' } as const)
         : decodeClientMessage(data.toString());
-      if (decoded.ok) rooms.handle(peer, decoded.message);
-      else peer.send({ t: 'error', code: 'bad-message', message: decoded.error });
+      if (decoded.ok) {
+        try {
+          rooms.handle(peer, decoded.message);
+        } catch (err) {
+          console.error('Error handling peer message:', err);
+        }
+      } else peer.send({ t: 'error', code: 'bad-message', message: decoded.error });
     });
     // A socket that broke (1006, no close frame) or that a client closed as a drop (4000 up) may come back with `rejoin`;
     // one closed on purpose (1000, 1001 a closed tab, 1005) has left.

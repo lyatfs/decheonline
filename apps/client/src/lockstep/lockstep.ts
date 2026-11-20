@@ -91,10 +91,15 @@ export class Lockstep {
   pongDelayMs = 0;
 
   private readonly link: Link;
-  private readonly paceScale: number;
+  private readonly baseSpeed: number;
   private readonly timers: Timers;
   private readonly now: () => number;
   private readonly frameMs: () => number;
+
+  private get paceScale(): number {
+    const gameSpeed = this.world?.gameSpeed || 1;
+    return 1 / (this.baseSpeed * gameSpeed);
+  }
   private readonly released = new Map<number, { batches: TurnBatch[]; speed?: SpeedChange }>();
   /** Released turns received so far (the relay releases them in order). */
   private received = 0;
@@ -121,7 +126,7 @@ export class Lockstep {
     this.timers = timers;
     this.now = now;
     this.frameMs = frameMs;
-    this.paceScale = 1 / speed;
+    this.baseSpeed = speed;
     // A random map game with the lobby's settings and civs: both peers build the same map and start objects from the
     // shared seed (docs/spec/random-maps.md, docs/spec/lobby.md §5).
     const civs = start.civs ?? new Array<number>(start.playerCount).fill(CIV_EGYPTIAN);

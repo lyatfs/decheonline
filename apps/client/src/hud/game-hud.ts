@@ -14,6 +14,7 @@ import {
   typeOf,
   UNIT_LEVEL_TRADE,
   UNIT_LEVEL_TRANSPORT,
+  UNIT_TYPES,
   type Command,
   type Entity,
   type World,
@@ -62,10 +63,10 @@ const ITEM_POPULATION = 4;
 const ITEM_PROGRESS = 9;
 const ITEM_GOLD = 3;
 /**
- * The itemicon frame of a held resource by `attribute_type_held` (tpnl_obj.cpp:365-388): food (0, 15-17) 2, wood (1) 0,
+ * The itemicon frame of a held resource by `attribute_type_held` (tpnl_obj.cpp:365-388): food (0, 12, 15-17) 2, wood (1) 0,
  * stone (2) 1, gold (3) 3, trade goods (9) 5.
  */
-const ITEM_HELD: Record<number, number> = { 0: 2, 15: 2, 16: 2, 17: 2, 1: 0, 2: 1, 3: 3, 9: 5 };
+const ITEM_HELD: Record<number, number> = { 0: 2, 12: 2, 15: 2, 16: 2, 17: 2, 1: 0, 2: 1, 3: 3, 9: 5 };
 /** `unit_level`s whose own units show what they carry (3 villager, 4 soldier, 6 priest-like), and resource objects (1). */
 const CARRIER_LEVELS = new Set([3, 4, 6]);
 const LEVEL_RESOURCE = 1;
@@ -450,8 +451,18 @@ export class GameHud {
     const topArt = provider.interfaceFrame(screen, 0);
     const bottomArt = provider.interfaceFrame(screen, 1);
 
-    this.top.style.height = `${TOP_HEIGHT}px`;
+    const scale = window.innerWidth >= 1200 && window.innerHeight >= 700 ? 1.35 : 1;
+    const topHeight = Math.round(TOP_HEIGHT * scale);
+    this.top.style.height = `${topHeight}px`;
     this.topFrame.style.width = `${l.width}px`;
+    if (scale !== 1) {
+      this.topFrame.style.transform = `scale(${scale})`;
+      this.topFrame.style.transformOrigin = 'top center';
+    } else {
+      this.topFrame.style.transform = '';
+      this.topFrame.style.transformOrigin = '';
+    }
+    this.view.style.top = `${topHeight}px`;
     paintFrame(this.topFrame, topArt);
     // In a window wider than the art the strip carries on sideways with a plain stretch of it (between the icons and the
     // buttons); a background cannot repeat a part of an atlas, so that part is cut out.
@@ -691,7 +702,18 @@ export class GameHud {
     // Gaia's objects have no owner line; a player's shows the civilization (the scenario's player name in a campaign).
     this.objectCiv.textContent = entity.owner !== 0 ? civilizationName(provider, world.civs[entity.owner]!) : '';
     this.objectName.textContent = objectName(provider, entity.type, type);
-    const info = infoOf(provider, type);
+    let info = infoOf(provider, type);
+    if ((!info || info.icon < 0) && type.masterType === 30) {
+      for (const lt of UNIT_TYPES.values()) {
+        if (lt.deadUnitId === entity.type) {
+          const livingInfo = provider.unitInfo(lt.id);
+          if (livingInfo && livingInfo.icon >= 0) {
+            info = livingInfo;
+            break;
+          }
+        }
+      }
+    }
     const building = type.masterType >= BUILDING;
     // A building's picture is its master's `button_pict + building_facet` (tpnl_obj.cpp:180-185): the age's, in the art
     // of the building's culture, its owner's.
@@ -773,13 +795,22 @@ export class GameHud {
    * villager's, soldier's or priest's load once it rounds to 1 or more. The value is `(int)(amount + 0.5)`.
    */
   private heldRow(e: Entity): { icon: number; text: string } | null {
-    const level = this.o.provider.unitInfo(e.type)?.level;
     const icon = ITEM_HELD[e.heldType];
-    if (level === undefined || icon === undefined) return null;
+    if (icon === undefined) return null;
     const amount = Math.trunc(Math.fround(e.heldAmount + 0.5));
-    if (level === LEVEL_RESOURCE) return { icon, text: String(amount) };
-    if (!CARRIER_LEVELS.has(level) || e.owner !== this.o.player || amount < 1) return null;
-    return { icon, text: String(amount) };
+    if (amount <= 0 && e.owner === 0) return null;
+
+    const level = this.o.provider.unitInfo(e.type)?.level;
+    const simType = typeOf(this.o.world, e);
+
+    if (e.owner === 0 || level === LEVEL_RESOURCE || simType.trackAsResource === 1 || simType.masterType === 20 || simType.masterType === 30) {
+      if (e.heldAmount > 0) return { icon, text: String(amount) };
+    }
+
+    if (level !== undefined && CARRIER_LEVELS.has(level) && e.owner === this.o.player && amount >= 1) {
+      return { icon, text: String(amount) };
+    }
+    return null;
   }
 
   /**
