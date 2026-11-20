@@ -41,7 +41,7 @@ async function processAll() {
       });
     }
 
-    const SCALE = 0.38;
+    const SCALE = 0.25;
 
     function isBg(r, g, b, a) {
       return a < 25 || (r > 240 && g > 240 && b > 240);

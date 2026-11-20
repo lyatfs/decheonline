@@ -303,7 +303,7 @@ export class UnitLayer {
   /** Each texture with every other pixel black, by the parity of its top-left screen pixel. */
   private readonly foggedTextures = new WeakMap<Texture, (Texture | null | undefined)[]>();
   private press: { x: number; y: number; boxing: boolean } | null = null;
-  private rightDrag: { startX: number; startY: number; clientX: number; clientY: number; dragged: boolean; pointerId: number } | null = null;
+  private rightDown: { x: number; y: number; clientX: number; clientY: number; lastClientX: number; lastClientY: number; dragged: boolean } | null = null;
   /** Master id of the building being placed (`TRIBE_GAME_MODE_PLACE_BUILDING`), or null. */
   private placing: number | null = null;
   private readonly ghostSprite = new Sprite();
@@ -1206,6 +1206,10 @@ export class UnitLayer {
     on('pointerleave', () => {
       this.pointer = null;
       this.rollover(undefined);
+      if (this.rightDown) {
+        this.rightDown = null;
+        canvas.style.cursor = '';
+      }
     });
     on('pointerdown', (e) => {
       const p = local(e);
@@ -1232,30 +1236,36 @@ export class UnitLayer {
       if (this.clickMode && (e.button === 0 || (e.button === 2 && this.clickMode !== 'move'))) return this.commandAt(this.clickMode, p.x, p.y);
       if (e.button === 0) this.press = { ...p, boxing: false };
       else if (e.button === 2) {
-        this.rightDrag = {
-          startX: p.x,
-          startY: p.y,
+        this.rightDown = {
+          x: p.x,
+          y: p.y,
           clientX: e.clientX,
           clientY: e.clientY,
+          lastClientX: e.clientX,
+          lastClientY: e.clientY,
           dragged: false,
-          pointerId: e.pointerId,
         };
-        canvas.setPointerCapture(e.pointerId);
       }
     });
     on('pointermove', (e) => {
       const p = local(e);
       this.pointer = p;
-      if (this.rightDrag && e.pointerId === this.rightDrag.pointerId) {
-        const dx = e.clientX - this.rightDrag.clientX;
-        const dy = e.clientY - this.rightDrag.clientY;
-        const totalDist = Math.hypot(p.x - this.rightDrag.startX, p.y - this.rightDrag.startY);
-        if (this.rightDrag.dragged || totalDist >= 5) {
-          this.rightDrag.dragged = true;
-          this.rightDrag.clientX = e.clientX;
-          this.rightDrag.clientY = e.clientY;
+      if (this.rightDown) {
+        if (!this.rightDown.dragged) {
+          const dist = Math.hypot(e.clientX - this.rightDown.clientX, e.clientY - this.rightDown.clientY);
+          if (dist >= 14) {
+            this.rightDown.dragged = true;
+            this.rightDown.lastClientX = e.clientX;
+            this.rightDown.lastClientY = e.clientY;
+            canvas.style.cursor = 'grabbing';
+          }
+        }
+        if (this.rightDown.dragged) {
+          const dx = e.clientX - this.rightDown.lastClientX;
+          const dy = e.clientY - this.rightDown.lastClientY;
+          this.rightDown.lastClientX = e.clientX;
+          this.rightDown.lastClientY = e.clientY;
           this.o.view.camera.moveTo(this.o.view.camera.x - dx, this.o.view.camera.y - dy);
-          canvas.style.cursor = 'grabbing';
           return;
         }
       }
@@ -1308,17 +1318,14 @@ export class UnitLayer {
     window.addEventListener('keydown', onKey);
     this.cleanup.push(() => window.removeEventListener('keydown', onKey));
     on('pointerup', (e) => {
-      if (e.button === 2 && this.rightDrag) {
-        if (canvas.hasPointerCapture(e.pointerId)) {
-          canvas.releasePointerCapture(e.pointerId);
-        }
-        const wasDragged = this.rightDrag.dragged;
-        const startX = this.rightDrag.startX;
-        const startY = this.rightDrag.startY;
-        this.rightDrag = null;
+      if (e.button === 2 && this.rightDown) {
+        const wasDragged = this.rightDown.dragged;
+        const clickX = this.rightDown.x;
+        const clickY = this.rightDown.y;
+        this.rightDown = null;
         canvas.style.cursor = '';
         if (!wasDragged) {
-          this.orderAt(startX, startY);
+          this.orderAt(clickX, clickY);
         }
         return;
       }
@@ -1332,12 +1339,9 @@ export class UnitLayer {
       this.press = null;
       this.box.clear();
     });
-    on('pointercancel', (e) => {
-      if (this.rightDrag && e.pointerId === this.rightDrag.pointerId) {
-        if (canvas.hasPointerCapture(e.pointerId)) {
-          canvas.releasePointerCapture(e.pointerId);
-        }
-        this.rightDrag = null;
+    on('pointercancel', () => {
+      if (this.rightDown) {
+        this.rightDown = null;
         canvas.style.cursor = '';
       }
     });
