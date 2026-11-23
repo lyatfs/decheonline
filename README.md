@@ -2,20 +2,19 @@
 
 Bản làm lại Age of Empires 1 chạy trên trình duyệt (nhắm tới AoE1 + Rise of Rome 1.0a): lockstep tất định, phòng 2 người chơi vào bằng mã mời. TypeScript monorepo (npm workspaces), Node >= 24.
 
-*English: a browser remake of Age of Empires 1, deterministic lockstep, 2-player rooms joined by invite code. This repository contains **no original game files**: you must own AoE1 / Rise of Rome and import the assets from your own install.*
+*English: a browser remake of Age of Empires 1, deterministic lockstep, 2-player rooms joined by invite code. The runtime asset pack is included so a fresh clone can display the full map and UI.*
 
-## Không có file gốc của game
+## Asset đi kèm repository
 
-Repo này không chứa bất kỳ file nào của game gốc (`empires.dat`, `.drs`, `.slp`, `.wav`, `.mid`, bảng màu...). Bạn phải sở hữu bản AoE1 / Rise of Rome hợp lệ. Công cụ import sẽ đọc từ thư mục cài đặt của bạn và tạo "pack" trong `assets-local/pack/` (đã gitignore, ~100 MB). `npm run check` có guard từ chối mọi file game bị track.
+Repository chứa `assets-local/pack/` để bản clone mới có đủ terrain, map, UI và âm thanh. Bộ cài game gốc và các file import trung gian vẫn nằm ngoài Git. `npm run check` kiểm tra không có file game thô bị track ngoài pack.
 
-## Import asset từ bản cài của bạn
+## Cài đặt
 
 ```sh
 npm ci
-AOE1_DIR="<thư mục cài AoE1>" npm run assets:import
 ```
 
-Pack gồm `empires.dat`, đồ họa (DRS/SLP + palette), âm thanh wav, nhạc mid. Nhạc cần một sound bank General MIDI: đặt `MUSIC_BANK=<file .dls/.sf2>`, nếu không sẽ dùng bank của hệ điều hành.
+Chỉ cần import lại khi muốn tạo pack từ bản cài khác: `AOE1_DIR="<thư mục cài AoE1>" npm run assets:import`. Pack được track trong Git, nên kiểm tra thay đổi trước khi commit. Nhạc cần một sound bank General MIDI: đặt `MUSIC_BANK=<file .dls/.sf2>`, nếu không sẽ dùng bank của hệ điều hành.
 
 ## Chạy local (dev)
 
