@@ -303,7 +303,17 @@ export class UnitLayer {
   /** Each texture with every other pixel black, by the parity of its top-left screen pixel. */
   private readonly foggedTextures = new WeakMap<Texture, (Texture | null | undefined)[]>();
   private press: { x: number; y: number; boxing: boolean } | null = null;
-  private rightDown: { x: number; y: number; clientX: number; clientY: number; lastClientX: number; lastClientY: number; dragged: boolean } | null = null;
+  private rightDown: {
+    pointerId: number;
+    captured: boolean;
+    x: number;
+    y: number;
+    clientX: number;
+    clientY: number;
+    lastClientX: number;
+    lastClientY: number;
+    dragged: boolean;
+  } | null = null;
   /** Master id of the building being placed (`TRIBE_GAME_MODE_PLACE_BUILDING`), or null. */
   private placing: number | null = null;
   private readonly ghostSprite = new Sprite();
@@ -532,6 +542,7 @@ export class UnitLayer {
 
   /** Start placing building `unit` (`command_building`): its ghost follows the pointer until a click. */
   startPlacement(unit: number): void {
+    this.clearRightDown();
     this.placing = unit;
     this.press = null;
     this.box.clear();
@@ -549,7 +560,46 @@ export class UnitLayer {
     this.o.onPlacement?.(null);
   }
 
+  private capturePointer(canvas: HTMLCanvasElement, pointerId: number): boolean {
+    try {
+      canvas.setPointerCapture?.(pointerId);
+      return typeof canvas.hasPointerCapture === 'function' ? canvas.hasPointerCapture(pointerId) : true;
+    } catch {
+      return false;
+    }
+  }
+
+  private releasePointer(canvas: HTMLCanvasElement, pointerId: number): void {
+    try {
+      if (typeof canvas.hasPointerCapture !== 'function' || canvas.hasPointerCapture(pointerId)) {
+        canvas.releasePointerCapture?.(pointerId);
+      }
+    } catch {
+      // Ignore when capture is inactive or already released (e.g. synthetic PointerEvents).
+    }
+  }
+
+  private hasRightCapture(canvas: HTMLCanvasElement, pointerId: number): boolean {
+    if (!this.rightDown || this.rightDown.pointerId !== pointerId) return false;
+    return typeof canvas.hasPointerCapture === 'function' ? canvas.hasPointerCapture(pointerId) : this.rightDown.captured;
+  }
+
+  private clearRightDown(): void {
+    const current = this.rightDown;
+    if (!current) return;
+    this.rightDown = null;
+    const canvas = this.o.app.canvas;
+    this.releasePointer(canvas, current.pointerId);
+    if (current.dragged || canvas.style.cursor === 'grabbing') {
+      canvas.style.cursor = '';
+    }
+  }
+
   destroy(): void {
+    this.clearRightDown();
+    this.press = null;
+    this.wallDrag = null;
+    this.placing = null;
     this.o.app.ticker.remove(this.tick);
     this.o.app.canvas.style.cursor = '';
     for (const fn of this.cleanup) fn();
@@ -1198,6 +1248,10 @@ export class UnitLayer {
       canvas.addEventListener(type, fn);
       this.cleanup.push(() => canvas.removeEventListener(type, fn));
     };
+    const onWindow = <K extends keyof WindowEventMap>(type: K, fn: (e: WindowEventMap[K]) => void) => {
+      window.addEventListener(type, fn);
+      this.cleanup.push(() => window.removeEventListener(type, fn));
+    };
     const local = (e: MouseEvent) => {
       const r = canvas.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
@@ -1206,22 +1260,22 @@ export class UnitLayer {
     on('pointerleave', () => {
       this.pointer = null;
       this.rollover(undefined);
-      if (this.rightDown) {
-        this.rightDown = null;
-        canvas.style.cursor = '';
+      if (this.rightDown && !this.hasRightCapture(canvas, this.rightDown.pointerId)) {
+        this.clearRightDown();
       }
     });
     on('pointerdown', (e) => {
       const p = local(e);
       this.pointer = p;
       if (this.placing !== null) {
+        this.clearRightDown();
         if (this.isWall(this.placing)) {
           // `start_scroll_view(3)`: the press starts the line on the tile under the pointer, when that is on the map.
           if (e.button === 0) {
             const tile = this.tileAt(p, false);
             this.wallDrag = tile && { col1: tile.col, row1: tile.row, col2: tile.col, row2: tile.row };
             // `capture_mouse`: the release ends the line wherever it happens.
-            if (tile) canvas.setPointerCapture(e.pointerId);
+            if (tile) this.capturePointer(canvas, e.pointerId);
           } else if (e.button === 2) this.cancelPlacement();
           return;
         }
@@ -1233,10 +1287,16 @@ export class UnitLayer {
         return;
       }
       // An order mode takes the next left click, or right click but in the Move mode (whose right click is a plain order).
-      if (this.clickMode && (e.button === 0 || (e.button === 2 && this.clickMode !== 'move'))) return this.commandAt(this.clickMode, p.x, p.y);
+      if (this.clickMode && (e.button === 0 || (e.button === 2 && this.clickMode !== 'move'))) {
+        this.clearRightDown();
+        return this.commandAt(this.clickMode, p.x, p.y);
+      }
       if (e.button === 0) this.press = { ...p, boxing: false };
       else if (e.button === 2) {
+        this.clearRightDown();
         this.rightDown = {
+          pointerId: e.pointerId,
+          captured: false,
           x: p.x,
           y: p.y,
           clientX: e.clientX,
@@ -1245,12 +1305,22 @@ export class UnitLayer {
           lastClientY: e.clientY,
           dragged: false,
         };
+        this.rightDown.captured = this.capturePointer(canvas, e.pointerId);
       }
     });
     on('pointermove', (e) => {
       const p = local(e);
       this.pointer = p;
-      if (this.rightDown) {
+      if (this.placing !== null) {
+        this.clearRightDown();
+        // A right press during the drag (a chorded button, which comes as a move) stops placing, as a right click does.
+        if (this.wallDrag && e.buttons & 2) return this.cancelPlacement();
+        // `handle_scroll_view` of the line: its end follows the pointer while it is over the map.
+        const tile = this.wallDrag && this.tileAt(p, false);
+        if (this.wallDrag && tile) Object.assign(this.wallDrag, { col2: tile.col, row2: tile.row });
+        return;
+      }
+      if (this.rightDown && e.pointerId === this.rightDown.pointerId) {
         if (!this.rightDown.dragged) {
           const dist = Math.hypot(e.clientX - this.rightDown.clientX, e.clientY - this.rightDown.clientY);
           if (dist >= 14) {
@@ -1269,15 +1339,7 @@ export class UnitLayer {
           return;
         }
       }
-      if (this.placing !== null) {
-        // A right press during the drag (a chorded button, which comes as a move) stops placing, as a right click does.
-        if (this.wallDrag && e.buttons & 2) return this.cancelPlacement();
-        // `handle_scroll_view` of the line: its end follows the pointer while it is over the map.
-        const tile = this.wallDrag && this.tileAt(p, false);
-        if (this.wallDrag && tile) Object.assign(this.wallDrag, { col2: tile.col, row2: tile.row });
-        return;
-      }
-      if (!this.press) {
+      if (!this.press && !this.rightDown?.dragged) {
         const enemy = this.attackTarget(p.x, p.y);
         const work = enemy ? undefined : this.workTarget(p.x, p.y);
         const ring = enemy || work ? false : (this.priestTarget(p.x, p.y) ?? this.boardTarget(p.x, p.y)) !== undefined;
@@ -1285,6 +1347,7 @@ export class UnitLayer {
         this.rollover(enemy);
         return;
       }
+      if (!this.press) return;
       if (!this.press.boxing && Math.hypot(p.x - this.press.x, p.y - this.press.y) < BOX_THRESHOLD) return;
       this.press.boxing = true;
       this.box.clear().rect(Math.min(p.x, this.press.x), Math.min(p.y, this.press.y), Math.abs(p.x - this.press.x), Math.abs(p.y - this.press.y));
@@ -1315,18 +1378,13 @@ export class UnitLayer {
       else if (s.kind === 'ungroup') this.ungroup();
       else this.armMove();
     };
-    window.addEventListener('keydown', onKey);
-    this.cleanup.push(() => window.removeEventListener('keydown', onKey));
+    onWindow('keydown', onKey);
     on('pointerup', (e) => {
-      if (e.button === 2 && this.rightDown) {
-        const wasDragged = this.rightDown.dragged;
-        const clickX = this.rightDown.x;
-        const clickY = this.rightDown.y;
-        this.rightDown = null;
-        canvas.style.cursor = '';
-        if (!wasDragged) {
-          this.orderAt(clickX, clickY);
-        }
+      if (e.button === 2 && this.rightDown && e.pointerId === this.rightDown.pointerId) {
+        const { dragged, x, y } = this.rightDown;
+        const canOrder = !dragged && this.placing === null;
+        this.clearRightDown();
+        if (canOrder) this.orderAt(x, y);
         return;
       }
       if (e.button === 0 && this.wallDrag) return this.placeWall(e.shiftKey || e.ctrlKey);
@@ -1339,10 +1397,23 @@ export class UnitLayer {
       this.press = null;
       this.box.clear();
     });
-    on('pointercancel', () => {
-      if (this.rightDown) {
-        this.rightDown = null;
-        canvas.style.cursor = '';
+    on('pointercancel', (e) => {
+      if (this.rightDown?.pointerId === e.pointerId) this.clearRightDown();
+    });
+    on('lostpointercapture', (e) => {
+      if (this.rightDown?.pointerId === e.pointerId) this.clearRightDown();
+    });
+    onWindow('pointerup', (e) => {
+      if (e.button === 2 && this.rightDown?.pointerId === e.pointerId) this.clearRightDown();
+    });
+    onWindow('pointercancel', (e) => {
+      if (this.rightDown?.pointerId === e.pointerId) this.clearRightDown();
+    });
+    onWindow('blur', () => {
+      this.clearRightDown();
+      if (this.press) {
+        this.press = null;
+        this.box.clear();
       }
     });
   }
@@ -1396,6 +1467,7 @@ export class UnitLayer {
    * `command_unload`, scr_game.cpp:3840-4370): the next left or right click on the map names its target, and the message line says so.
    */
   armCommand(mode: ClickMode): void {
+    this.clearRightDown();
     this.cancelPlacement();
     this.setClickMode(mode);
     this.o.onMessage?.(MODE_MESSAGE[mode]);

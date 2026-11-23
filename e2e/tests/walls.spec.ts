@@ -141,3 +141,48 @@ test('a right click while dragging a wall line stops placing and sends nothing',
   await host.waitForFunction((t) => window.__game!.turn() > t + 4, turn);
   expect(await walls(host)).toEqual([]);
 });
+
+test('right-drag camera pan onto HUD cleans up state and does not interfere with subsequent wall drag', async ({ browser }) => {
+  const [host] = await startGame(browser);
+  const villager = (await host.evaluate(() => window.__game!.units())).find((u) => u.owner === 1 && u.type === VILLAGER)!;
+  const box = (await host.getByTestId('game-canvas').boundingBox())!;
+  const vAt = (await host.evaluate((i) => window.__game!.unitScreenPos(i), villager.id))!;
+  await host.mouse.click(box.x + vAt.x, box.y + vAt.y - 15);
+  await expect.poll(() => host.evaluate(() => window.__game!.selection())).toEqual([villager.id]);
+
+  // Right-drag from the canvas centre onto the bottom HUD panel, then release outside the playable canvas area.
+  const camBefore = await host.evaluate(() => window.__map!.camera());
+  const dragStart = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const hudPoint = { x: box.x + box.width / 2 - 40, y: box.y + box.height - 25 };
+  await host.mouse.move(dragStart.x, dragStart.y);
+  await host.mouse.down({ button: 'right' });
+  await host.mouse.move(dragStart.x - 20, dragStart.y + 30, { steps: 3 });
+  await host.mouse.move(hudPoint.x, hudPoint.y, { steps: 4 });
+  await host.mouse.up({ button: 'right' });
+
+  const camAfter = await host.evaluate(() => window.__map!.camera());
+  expect(camAfter).not.toEqual(camBefore);
+  const cursor = await host.getByTestId('game-canvas').evaluate((el) => (el as HTMLElement).style.cursor);
+  expect(cursor).not.toBe('grabbing');
+
+  // Move pointer back inside the map, wait a few turns, and verify no right-click order was emitted.
+  await host.mouse.move(dragStart.x, dragStart.y);
+  const turnAfterDrag = await host.evaluate(() => window.__game!.turn());
+  await host.waitForFunction((t) => window.__game!.turn() > t + 3, turnAfterDrag);
+  expect(await host.evaluate(() => window.__game!.applied().flat())).toEqual([]);
+
+  // Re-center and verify wall placement + drag works cleanly with zero stale rightDown interference.
+  await host.evaluate(() => window.__map!.centerOnTile(11, 10));
+  await chooseWall(host);
+  const start = await tilePoint(host, 9, 9);
+  await host.mouse.move(start.x, start.y);
+  await host.mouse.down();
+  const end = await tilePoint(host, 12, 9);
+  await host.mouse.move(end.x, end.y, { steps: 5 });
+  await expect.poll(async () => (await host.evaluate(() => window.__game!.ghost()))?.segments?.length).toBe(4);
+  await host.mouse.up();
+  await expect.poll(() => host.evaluate(() => window.__game!.ghost())).toBeNull();
+  await expect
+    .poll(() => host.evaluate(() => window.__game!.applied().flat().map((c) => c.type)))
+    .toContain('build-wall');
+});

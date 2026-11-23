@@ -71,6 +71,9 @@ export class LobbyView {
   private name = 'Player';
   private text: Text = englishText;
   private bot: AiBot | null = null;
+  private botSpawning = false;
+  private botGeneration = 0;
+  private autoStartTimer: ReturnType<typeof setTimeout> | null = null;
   private autoSinglePlayer = false;
   /** The room's chat, kept across redraws: the box of lines and the input. */
   private readonly chatLog = el('div', { className: 'chat-log', testid: 'lobby-chat' });
@@ -104,28 +107,26 @@ export class LobbyView {
     if (state.phase === 'lobby' && !this.inRoom) this.chatLog.replaceChildren();
     this.inRoom = state.phase === 'lobby';
 
-    if (state.phase === 'ended') {
-      if (this.bot) {
-        this.bot.destroy();
-        this.bot = null;
-      }
+    if (state.phase === 'ended' || state.phase === 'idle') {
+      this.cleanupBot();
       this.autoSinglePlayer = false;
     }
 
     if (state.phase === 'lobby' && this.autoSinglePlayer) {
-      if (!this.bot && state.players.length === 1) {
-        AiBot.spawn(state.code, 'Computer (Hard)', Math.floor(Math.random() * 16) + 1).then((b) => {
-          this.bot = b;
-        });
+      if (state.players.length === 1) {
+        this.spawnBot(state.code);
       }
       const me = state.players.find((p) => p.slot === state.you);
       if (me && !me.ready) {
         this.session.setReady(true);
       }
       const everyoneReady = state.players.length === 2 && state.players.every((p) => p.ready);
-      if (everyoneReady && state.you === 0) {
+      if (everyoneReady && state.you === 0 && this.autoStartTimer === null) {
         this.autoSinglePlayer = false;
-        setTimeout(() => this.session.start(), 300);
+        this.autoStartTimer = setTimeout(() => {
+          this.autoStartTimer = null;
+          if (this.session.state.phase === 'lobby') this.session.start();
+        }, 300);
       }
     }
 
@@ -133,6 +134,40 @@ export class LobbyView {
     const typing = document.activeElement === this.chatInput;
     this.root.replaceChildren(state.phase === 'lobby' ? this.room(state) : this.entry(state));
     if (typing && this.chatInput.isConnected) this.chatInput.focus();
+  }
+
+  private cleanupBot(): void {
+    this.botGeneration++;
+    this.botSpawning = false;
+    if (this.autoStartTimer !== null) {
+      clearTimeout(this.autoStartTimer);
+      this.autoStartTimer = null;
+    }
+    if (this.bot) {
+      this.bot.destroy();
+      this.bot = null;
+    }
+  }
+
+  private spawnBot(code: string): void {
+    if (this.bot || this.botSpawning || !code) return;
+    const gen = this.botGeneration;
+    this.botSpawning = true;
+    const civ = Math.floor(Math.random() * 16) + 1;
+    void AiBot.spawn(code, 'Computer (Hard)', civ)
+      .then((b) => {
+        if (gen !== this.botGeneration || this.session.state.phase !== 'lobby' || this.session.state.code !== code) {
+          b.destroy();
+          return;
+        }
+        this.bot = b;
+      })
+      .catch(() => {
+        // Spawn failed (e.g. network error); allow future retry while still in lobby
+      })
+      .finally(() => {
+        if (gen === this.botGeneration) this.botSpawning = false;
+      });
   }
 
   /** `word_wrap_append` a line; the box follows the newest line when it was showing the last one. */
@@ -159,6 +194,7 @@ export class LobbyView {
     singlePlayerBtn.style.border = '2px solid #ffe57f';
     singlePlayerBtn.style.boxShadow = '0 0 15px rgba(212, 175, 55, 0.4)';
     singlePlayerBtn.addEventListener('click', () => {
+      this.cleanupBot();
       this.autoSinglePlayer = true;
       this.session.create(this.name);
     });
@@ -213,14 +249,11 @@ export class LobbyView {
     }
     if (state.players.length < 2) {
       list.append(el('li', {}, 'Waiting for a second player...'));
-      if (host && !this.bot) {
+      if (host && !this.bot && !this.botSpawning) {
         const addBot = el('button', { testid: 'add-bot-btn', className: 'primary' }, '🤖 Thêm Máy (Add AI Bot)');
         addBot.addEventListener('click', () => {
-          if (!this.bot) {
-            AiBot.spawn(state.code, 'Computer (Hard)', Math.floor(Math.random() * 16) + 1).then((b) => {
-              this.bot = b;
-            });
-          }
+          addBot.disabled = true;
+          this.spawnBot(state.code);
         });
         list.append(el('li', { style: 'margin-top: 0.5rem; list-style: none;' }, addBot));
       }
@@ -229,10 +262,8 @@ export class LobbyView {
     ready.addEventListener('click', () => this.session.setReady(!me?.ready));
     const leave = el('button', { testid: 'leave' }, 'Leave');
     leave.addEventListener('click', () => {
-      if (this.bot) {
-        this.bot.destroy();
-        this.bot = null;
-      }
+      this.cleanupBot();
+      this.autoSinglePlayer = false;
       this.session.leave();
     });
     const box = el(
