@@ -310,7 +310,7 @@ const ATTR_CURRENT_AGE = 6;
 export async function startMultiplayer(host: HTMLElement, app: Application, { debug, speed, resources, bowmen, market, houses, relics, ruins, wonder, buildings, units: startUnits, naval, testMap, seed, perturb, setGameVisible }: MultiplayerOptions): Promise<void> {
   const link = await connect();
   const session = new Session(link);
-  const view = new LobbyView(session);
+  const view = new LobbyView(session, { testMap: debug && testMap, speed });
   host.append(view.root);
   // The setup screen's names (civs, maps, victory) from the pack's language strings once it loads.
   // Made before the lobby so its clicks start the audio (browsers allow it only after a gesture).
@@ -382,6 +382,8 @@ export async function startMultiplayer(host: HTMLElement, app: Application, { de
         seed: debug && seed !== undefined ? seed : start.seed,
         commandDelay: start.commandDelay,
         playerCount: start.players.length,
+        mode: start.mode,
+        slot: you,
         settings: start.settings,
         civs: start.players.map((p) => p.civ),
         rejoin: { code: session.state.code, slot: you, token: start.token },
@@ -513,6 +515,18 @@ export async function startMultiplayer(host: HTMLElement, app: Application, { de
         sounds: gameSounds,
         music,
         game: {
+          singlePlayerSpeed: game.mode === 'single-player' && you === 0,
+          pause: {
+            get allowed() { return game.canPause(); },
+            get paused() { return game.isPaused(); },
+            toggle: (paused) => paused === undefined ? game.togglePause() : game.requestPause(paused),
+            onChange: (handler) => {
+              const previous = game.onPauseChange;
+              const listener: typeof previous = (paused, state) => { previous(paused, state); handler(paused); };
+              game.onPauseChange = listener;
+              return () => { if (game.onPauseChange === listener) game.onPauseChange = previous; };
+            },
+          },
           names,
           resign: () => game.issue({ type: 'resign' }),
           // The original resigns a player who quits a game still on (`SendIResignMsg`): the other one wins.

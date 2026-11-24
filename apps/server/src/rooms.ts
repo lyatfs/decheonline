@@ -4,17 +4,28 @@ import {
   CODE_ALPHABET,
   CODE_LENGTH,
   COMMAND_DELAY_TURNS,
+  DEFAULT_BOT_DIFFICULTY,
   DEFAULT_GAME_SETTINGS,
+  DEFAULT_ROOM_MODE,
   DROP_AFTER_MS,
+  MAX_NAME_LENGTH,
   MAX_PLAYERS,
   MAX_TURNS_AHEAD,
+  isBotDifficulty,
+  isLobbyCiv,
+  isMultiplayerGameSpeed,
+  isRoomMode,
+  isSinglePlayerGameSpeed,
   isValidCode,
   normalizeCode,
+  parseLobbySettings,
+  type BotDifficulty,
   type ClientMessage,
   type Command,
   type ErrorCode,
   type GameSettings,
   type PlayerInfo,
+  type RoomMode,
   type ServerMessage,
   type SpeedChange,
   type TurnBatch,
@@ -63,8 +74,12 @@ interface Member {
   dropped: boolean;
   /** Cancels the drop while the socket is away. */
   cancelDrop: (() => void) | null;
+  /** Drop timer fired while room was paused; re-armed on resume. */
+  pendingDrop: boolean;
   /** Submitted a resign command: leaving no longer ends the game for the others. */
   resigned: boolean;
+  /** True when this member joined slot 1 of a single-player room using `botToken`. */
+  isBot: boolean;
 }
 
 export class Room {
@@ -74,12 +89,21 @@ export class Room {
   readonly desyncs: number[] = [];
   started = false;
   seed = 0;
+  paused = false;
+  pauseBoundary = 0;
+  pauseEpoch = 0;
+  gameOver = false;
   /** The host's map type, map size and victory condition (docs/spec/lobby.md §2). */
   settings: GameSettings = structuredClone(DEFAULT_GAME_SETTINGS);
   /** Step size and buffer frames: the server plays the host (docs/spec/turn-timing.md §8.2). */
   readonly speed = new SpeedHost();
 
-  constructor(readonly code: string) {}
+  constructor(
+    readonly code: string,
+    readonly mode: RoomMode = DEFAULT_ROOM_MODE,
+    readonly difficulty?: BotDifficulty,
+    readonly botToken?: string,
+  ) {}
 
   players(): PlayerInfo[] {
     return this.members.map((m, slot) => ({ slot, name: m.name, ready: m.ready, civ: m.civ }));
@@ -96,7 +120,19 @@ export class Room {
 
   sendLobby(): void {
     const players = this.players();
-    this.members.forEach((m, you) => m.peer?.send({ t: 'lobby', code: this.code, you, players, settings: this.settings }));
+    const extra = this.mode === 'single-player' && this.difficulty !== undefined ? { difficulty: this.difficulty } : {};
+    this.members.forEach((m, you) =>
+      m.peer?.send({
+        t: 'lobby',
+        code: this.code,
+        you,
+        players,
+        settings: this.settings,
+        mode: this.mode,
+        ...extra,
+        ...(this.mode === 'single-player' && you === 0 && !m.isBot && this.botToken ? { botToken: this.botToken } : {}),
+      }),
+    );
   }
 }
 
@@ -157,9 +193,9 @@ export class RoomRegistry {
   handle(peer: Peer, message: ClientMessage): void {
     switch (message.t) {
       case 'create':
-        return this.create(peer, message.name);
+        return this.create(peer, message.name, message.mode, message.difficulty);
       case 'join':
-        return this.join(peer, message.code, message.name);
+        return this.join(peer, message.code, message.name, message.botToken);
       case 'rejoin':
         return this.rejoin(peer, message.code, message.slot, message.token, message.received);
       case 'leave':
@@ -179,15 +215,21 @@ export class RoomRegistry {
         if (room.started) return reject(peer, 'room-started', 'game already started');
         member.ready = message.ready;
         return room.sendLobby();
-      case 'settings':
+      case 'settings': {
         if (room.started) return reject(peer, 'room-started', 'game already started');
         if (slot !== 0) return reject(peer, 'not-host', 'only the host can change the settings');
         if (member.ready) return reject(peer, 'locked', 'the settings cannot change while the host is ready');
-        room.settings = message.settings;
+        const valid = parseLobbySettings(message.settings);
+        if (valid === null) return reject(peer, 'invalid-settings', 'invalid game settings');
+        room.settings = valid;
         return room.sendLobby();
+      }
       case 'civ':
         if (room.started) return reject(peer, 'room-started', 'game already started');
         if (member.ready) return reject(peer, 'locked', 'the civilization cannot change while ready');
+        if (typeof message.civ !== 'number' || !isLobbyCiv(message.civ)) {
+          return reject(peer, 'invalid-settings', 'invalid civilization');
+        }
         member.civ = message.civ;
         return room.sendLobby();
       case 'start':
@@ -201,6 +243,8 @@ export class RoomRegistry {
         return this.reportHash(room, member, peer, message.turn, message.hash);
       case 'chat':
         return this.chat(room, slot, message.text, message.to);
+      case 'pause':
+        return this.pause(room, member, slot, peer, message.paused, message.epoch);
     }
   }
 
@@ -221,6 +265,7 @@ export class RoomRegistry {
     if (room.started && member.resigned && room.members.some((m) => m !== member && m.peer !== null)) {
       member.peer = null;
       member.dropped = true;
+      room.gameOver = true;
       this.release(room);
       return;
     }
@@ -263,7 +308,12 @@ export class RoomRegistry {
     member.cancelDrop = null;
     if (this.rooms.get(room.code) !== room) return;
     if (room.members.every((m) => m.peer === null)) return this.closeRoom(room);
+    if (room.paused) {
+      member.pendingDrop = true;
+      return;
+    }
     member.dropped = true;
+    room.gameOver = true;
     room.broadcast({ t: 'dropped', slot: room.members.indexOf(member) });
     member.pending.set(member.nextTurn, [{ type: 'resign' }]);
     member.nextTurn++;
@@ -283,16 +333,27 @@ export class RoomRegistry {
     if (member.peer) this.byPeer.delete(member.peer);
     member.cancelDrop?.();
     member.cancelDrop = null;
+    member.pendingDrop = false;
     member.peer = peer;
     member.heardAt = this.now();
     this.byPeer.set(peer, room);
-    peer.send({ t: 'rejoined', nextTurn: member.nextTurn });
+    const pauseSnapshot =
+      room.paused || room.pauseEpoch > 0
+        ? { paused: room.paused, pauseBoundary: room.pauseBoundary, pauseEpoch: room.pauseEpoch }
+        : {};
+    peer.send({
+      t: 'rejoined',
+      nextTurn: member.nextTurn,
+      mode: room.mode,
+      ...(room.mode === 'single-player' && room.difficulty !== undefined ? { difficulty: room.difficulty } : {}),
+      ...pauseSnapshot,
+    });
     for (const record of room.log.slice(received)) peer.send({ t: 'turn', ...record });
     peer.send(room.rttMessage());
     this.ping(member, true);
   }
 
-  private newMember(peer: Peer, name: string, slot: number): Member {
+  private newMember(peer: Peer, name: string, slot: number, isBot: boolean): Member {
     return {
       peer,
       name: name === '' ? `Player ${slot + 1}` : name,
@@ -309,30 +370,53 @@ export class RoomRegistry {
       heardAt: this.now(),
       dropped: false,
       cancelDrop: null,
+      pendingDrop: false,
       resigned: false,
+      isBot,
     };
   }
 
-  private create(peer: Peer, name: string): void {
+  private create(peer: Peer, name: string, rawMode?: RoomMode, rawDifficulty?: BotDifficulty): void {
     if (this.byPeer.has(peer)) return reject(peer, 'already-in-room', 'leave the current room first');
+    if (typeof name !== 'string' || name.trim().length > MAX_NAME_LENGTH) {
+      return reject(peer, 'bad-message', 'invalid player name');
+    }
+    if (rawMode !== undefined && !isRoomMode(rawMode)) {
+      return reject(peer, 'invalid-settings', 'invalid room mode');
+    }
+    if (rawDifficulty !== undefined && !isBotDifficulty(rawDifficulty)) {
+      return reject(peer, 'invalid-settings', 'invalid bot difficulty');
+    }
+    const mode: RoomMode = rawMode ?? DEFAULT_ROOM_MODE;
+    const difficulty = mode === 'single-player' ? (rawDifficulty ?? DEFAULT_BOT_DIFFICULTY) : undefined;
+    const botToken = mode === 'single-player' ? this.generateToken() : undefined;
     let code = this.generateCode();
     while (this.rooms.has(code)) code = this.generateCode();
-    const room = new Room(code);
-    room.members.push(this.newMember(peer, name, 0));
+    const room = new Room(code, mode, difficulty, botToken);
+    room.members.push(this.newMember(peer, name.trim(), 0, false));
     this.rooms.set(code, room);
     this.byPeer.set(peer, room);
     room.sendLobby();
   }
 
-  private join(peer: Peer, rawCode: string, name: string): void {
+  private join(peer: Peer, rawCode: string, name: string, botToken?: string): void {
     if (this.byPeer.has(peer)) return reject(peer, 'already-in-room', 'leave the current room first');
+    if (typeof rawCode !== 'string' || rawCode.length > 32) return reject(peer, 'bad-code', 'no room with that invite code');
+    if (typeof name !== 'string' || name.trim().length > MAX_NAME_LENGTH) {
+      return reject(peer, 'bad-message', 'invalid player name');
+    }
     const code = normalizeCode(rawCode);
     const room = isValidCode(code) ? this.rooms.get(code) : undefined;
     if (!room) return reject(peer, 'bad-code', 'no room with that invite code');
     if (room.started) return reject(peer, 'room-started', 'game already started');
     if (room.members.length >= MAX_PLAYERS) return reject(peer, 'room-full', 'room is full');
+    if (room.mode === 'single-player') {
+      if (!room.botToken || typeof botToken !== 'string' || botToken.length === 0 || botToken !== room.botToken) {
+        return reject(peer, 'unauthorized', 'valid bot token required to join single-player room');
+      }
+    }
     for (const m of room.members) m.ready = false;
-    room.members.push(this.newMember(peer, name, room.members.length));
+    room.members.push(this.newMember(peer, name.trim(), room.members.length, room.mode === 'single-player'));
     this.byPeer.set(peer, room);
     room.sendLobby();
   }
@@ -346,9 +430,19 @@ export class RoomRegistry {
     room.started = true;
     room.seed = this.generateSeed();
     const players = room.players();
+    const extra = room.mode === 'single-player' && room.difficulty !== undefined ? { difficulty: room.difficulty } : {};
     for (const m of room.members) {
       m.token = this.generateToken();
-      m.peer?.send({ t: 'start', seed: room.seed, commandDelay: COMMAND_DELAY_TURNS, players, settings: room.settings, token: m.token });
+      m.peer?.send({
+        t: 'start',
+        seed: room.seed,
+        commandDelay: COMMAND_DELAY_TURNS,
+        players,
+        settings: room.settings,
+        token: m.token,
+        mode: room.mode,
+        ...extra,
+      });
     }
     for (const m of room.members) this.ping(m, true);
   }
@@ -377,9 +471,63 @@ export class RoomRegistry {
     if (turn - room.log.length >= MAX_TURNS_AHEAD) {
       return reject(peer, 'bad-turn', 'too many unreleased turns');
     }
+    const slot = room.members.indexOf(member);
+    for (const command of commands) {
+      if (command.type !== 'game-speed') continue;
+      if (room.mode === 'single-player') {
+        if (slot !== 0 || member.isBot) {
+          return reject(peer, 'unauthorized', 'only the single-player host can change game speed');
+        }
+        if (!isSinglePlayerGameSpeed(command.speed)) {
+          return reject(peer, 'invalid-settings', 'invalid single-player game speed');
+        }
+      } else if (!isMultiplayerGameSpeed(command.speed)) {
+        return reject(peer, 'invalid-settings', 'invalid multiplayer game speed');
+      }
+    }
     member.pending.set(turn, commands);
     member.nextTurn++;
-    if (commands.some((c) => c.type === 'resign')) member.resigned = true;
+    if (commands.some((c) => c.type === 'resign')) {
+      member.resigned = true;
+      room.gameOver = true;
+      // A resign must reach the sim even when nobody can manually resume after game over.
+      if (room.paused) this.resume(room);
+    }
+    this.release(room);
+  }
+
+  private pause(room: Room, member: Member, slot: number, peer: Peer, paused: boolean, epoch?: number): void {
+    if (!room.started) return reject(peer, 'not-started', 'game has not started');
+    if (room.mode !== 'single-player' || slot !== 0 || member.isBot) {
+      return reject(peer, 'unauthorized', 'only the single-player host can pause');
+    }
+    if (room.gameOver) return reject(peer, 'locked', 'cannot pause after game over');
+    if (epoch !== undefined && epoch !== room.pauseEpoch) return;
+    if (paused === room.paused) return;
+
+    if (paused) {
+      room.paused = true;
+      room.pauseBoundary = room.log.length + COMMAND_DELAY_TURNS;
+      room.pauseEpoch += 1;
+      room.broadcast({ t: 'paused', paused: true, boundary: room.pauseBoundary, epoch: room.pauseEpoch });
+    } else {
+      this.resume(room);
+    }
+  }
+
+  /** Clear the pause barrier before releasing held batches, including a resign received while paused. */
+  private resume(room: Room): void {
+    room.paused = false;
+    room.pauseEpoch += 1;
+    room.broadcast({ t: 'paused', paused: false, boundary: room.pauseBoundary, epoch: room.pauseEpoch });
+    for (const m of room.members) {
+      if (m.peer === null && !m.dropped) {
+        m.pendingDrop = false;
+        m.cancelDrop?.();
+        m.heardAt = this.now();
+        m.cancelDrop = this.schedule(() => this.drop(room, m), this.dropAfterMs);
+      }
+    }
     this.release(room);
   }
 
@@ -390,6 +538,7 @@ export class RoomRegistry {
   private release(room: Room): void {
     for (;;) {
       const turn = room.log.length;
+      if (room.paused && turn + COMMAND_DELAY_TURNS >= room.pauseBoundary) return;
       if (room.members.some((m) => !m.dropped && !m.pending.has(turn))) return;
       const batches = room.members.map((m, slot) => ({ slot, commands: m.pending.get(turn) ?? [] }));
       for (const m of room.members) m.pending.delete(turn);

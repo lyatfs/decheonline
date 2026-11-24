@@ -1,9 +1,14 @@
-import type { ErrorCode, GameSettings, PlayerInfo, ServerMessage, Slot } from '@aoe/protocol';
-import { DEFAULT_GAME_SETTINGS, MAX_CHAT_LENGTH, normalizeCode } from '@aoe/protocol';
+import type { BotDifficulty, ErrorCode, GameSettings, PlayerInfo, RoomMode, ServerMessage, Slot } from '@aoe/protocol';
+import { DEFAULT_GAME_SETTINGS, DEFAULT_ROOM_MODE, MAX_CHAT_LENGTH, normalizeCode } from '@aoe/protocol';
 import { track } from '../analytics';
 import type { Link } from '../net/link';
 
 export type StartMessage = Extract<ServerMessage, { t: 'start' }>;
+
+export interface CreateRoomOptions {
+  mode?: RoomMode;
+  difficulty?: BotDifficulty;
+}
 
 export interface LobbyState {
   phase: 'idle' | 'lobby' | 'playing' | 'ended';
@@ -13,6 +18,12 @@ export interface LobbyState {
   players: PlayerInfo[];
   /** The host's map type, map size and victory condition, as the server last sent them. */
   settings: GameSettings;
+  /** Server-authoritative room mode (`'multiplayer'` default). */
+  mode?: RoomMode;
+  /** Server-authoritative bot difficulty (only present in `'single-player'` mode). */
+  difficulty?: BotDifficulty;
+  /** Host-only secret token for spawning the slot-1 bot in `'single-player'` mode. */
+  botToken?: string;
   /** Last error from the server (bad code, room full, ...), cleared by the next action. */
   error: { code: ErrorCode | 'connection'; message: string } | null;
 }
@@ -27,7 +38,17 @@ const sameJson = (a: unknown, b: unknown): boolean => {
 export class Session {
   /** Settings sent whose echo has not come back, oldest first; while any is pending the shown settings are the local ones. */
   private pendingSettings: GameSettings[] = [];
-  state: LobbyState = { phase: 'idle', code: '', you: -1, players: [], settings: DEFAULT_GAME_SETTINGS, error: null };
+  state: LobbyState = {
+    phase: 'idle',
+    code: '',
+    you: -1,
+    players: [],
+    settings: DEFAULT_GAME_SETTINGS,
+    mode: DEFAULT_ROOM_MODE,
+    difficulty: undefined,
+    botToken: undefined,
+    error: null,
+  };
   /** Called after every state change. */
   onChange: (state: LobbyState) => void = () => {};
   /** Called when the host starts the game. */
@@ -39,19 +60,41 @@ export class Session {
     link.onMessage((m) => this.handle(m));
     link.onClose(() => {
       if (this.state.phase === 'playing') return; // lockstep reports this as the opponent leaving
-      this.set({ phase: 'idle', error: { code: 'connection', message: 'Connection to the server was lost.' } });
+      this.pendingSettings = [];
+      this.set({
+        phase: 'idle',
+        code: '',
+        you: -1,
+        players: [],
+        mode: DEFAULT_ROOM_MODE,
+        difficulty: undefined,
+        botToken: undefined,
+        error: { code: 'connection', message: 'Connection to the server was lost.' },
+      });
     });
   }
 
-  create(name: string): void {
+  create(name: string, options?: CreateRoomOptions): void {
     this.set({ error: null });
     track('room_create');
-    this.link.send({ t: 'create', name });
+    const mode = options?.mode;
+    const difficulty = mode === 'single-player' ? options?.difficulty : undefined;
+    this.link.send({
+      t: 'create',
+      name,
+      ...(mode !== undefined ? { mode } : {}),
+      ...(difficulty !== undefined ? { difficulty } : {}),
+    });
   }
 
-  join(code: string, name: string): void {
+  join(code: string, name: string, botToken?: string): void {
     this.set({ error: null });
-    this.link.send({ t: 'join', code: normalizeCode(code), name });
+    this.link.send({
+      t: 'join',
+      code: normalizeCode(code),
+      name,
+      ...(botToken !== undefined ? { botToken } : {}),
+    });
   }
 
   setReady(ready: boolean): void {
@@ -92,13 +135,28 @@ export class Session {
   leave(): void {
     this.link.send({ t: 'leave' });
     this.pendingSettings = [];
-    this.set({ phase: 'idle', code: '', you: -1, players: [], error: null });
+    this.set({
+      phase: 'idle',
+      code: '',
+      you: -1,
+      players: [],
+      mode: DEFAULT_ROOM_MODE,
+      difficulty: undefined,
+      botToken: undefined,
+      error: null,
+    });
   }
 
   /** The game is over (opponent left, desync): leave the room and show the entry screen. */
   finish(): void {
     this.link.send({ t: 'leave' });
-    this.set({ phase: 'ended' });
+    this.pendingSettings = [];
+    this.set({
+      phase: 'ended',
+      mode: DEFAULT_ROOM_MODE,
+      difficulty: undefined,
+      botToken: undefined,
+    });
   }
 
   private handle(m: ServerMessage): void {
@@ -107,14 +165,34 @@ export class Session {
         // An echo carrying a pending settings object answers it and every older one; others (a guest's ready or civ) change nothing here.
         const answered = this.pendingSettings.findIndex((p) => sameJson(p, m.settings));
         if (answered >= 0) this.pendingSettings.splice(0, answered + 1);
-        this.set({ phase: 'lobby', code: m.code, you: m.you, players: m.players, error: null, ...(this.pendingSettings.length === 0 && { settings: m.settings }) });
+        const mode = m.mode ?? DEFAULT_ROOM_MODE;
+        this.set({
+          phase: 'lobby',
+          code: m.code,
+          you: m.you,
+          players: m.players,
+          mode,
+          difficulty: mode === 'single-player' ? m.difficulty : undefined,
+          botToken: mode === 'single-player' ? m.botToken : undefined,
+          error: null,
+          ...(this.pendingSettings.length === 0 && { settings: m.settings }),
+        });
         return;
       }
-      case 'start':
+      case 'start': {
+        const mode = m.mode ?? this.state.mode ?? DEFAULT_ROOM_MODE;
+        const difficulty = mode === 'single-player' ? (m.difficulty ?? this.state.difficulty) : undefined;
         track('game_start', { map_type: m.settings.mapType, player_count: m.players.length });
-        this.set({ phase: 'playing', players: m.players, settings: m.settings });
+        this.set({ phase: 'playing', players: m.players, settings: m.settings, mode, difficulty });
         this.onStart(m, this.state.you);
         return;
+      }
+      case 'rejoined': {
+        const mode = m.mode ?? this.state.mode ?? DEFAULT_ROOM_MODE;
+        const difficulty = mode === 'single-player' ? (m.difficulty ?? this.state.difficulty) : undefined;
+        this.set({ mode, difficulty });
+        return;
+      }
       case 'error':
         this.pendingSettings = [];
         this.set({ error: { code: m.code, message: m.message } });

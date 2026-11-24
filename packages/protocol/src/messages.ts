@@ -1,16 +1,69 @@
 /** Wire messages between client and relay server. One JSON object per WebSocket text frame, tagged by `t`. */
 
-import { BUFFER_FRAMES, CIV_COUNT, CIV_RANDOM, COMMAND_DELAY_TURNS, DEFAULT_GAME_SETTINGS, isLobbyCiv, STEP_MS, type Command, type GameSettings, type SpeedChange } from '@aoe/sim';
+import {
+  BUFFER_FRAMES,
+  CIV_COUNT,
+  CIV_RANDOM,
+  COMMAND_DELAY_TURNS,
+  DEFAULT_GAME_SETTINGS,
+  DEFAULT_GAME_SPEED,
+  GAME_SPEEDS,
+  SINGLE_PLAYER_SPEED_MAX,
+  SINGLE_PLAYER_SPEED_MIN,
+  SINGLE_PLAYER_SPEED_STEP,
+  STEP_MS,
+  isLobbyCiv,
+  isLobbySettings,
+  isMultiplayerGameSpeed,
+  isSinglePlayerGameSpeed,
+  type Command,
+  type GameSettings,
+  type SpeedChange,
+} from '@aoe/sim';
 
 /** Games start at `STEP_MS` per step and `BUFFER_FRAMES`; the server retunes both (docs/spec/turn-timing.md §8). */
-export { BUFFER_FRAMES, COMMAND_DELAY_TURNS, STEP_MS, type Command, type SpeedChange };
+export {
+  BUFFER_FRAMES,
+  COMMAND_DELAY_TURNS,
+  DEFAULT_GAME_SPEED,
+  GAME_SPEEDS,
+  SINGLE_PLAYER_SPEED_MAX,
+  SINGLE_PLAYER_SPEED_MIN,
+  SINGLE_PLAYER_SPEED_STEP,
+  STEP_MS,
+  isMultiplayerGameSpeed,
+  isSinglePlayerGameSpeed,
+  type Command,
+  type SpeedChange,
+};
 /** The lobby's settings and civs (docs/spec/lobby.md). */
-export { CIV_COUNT, CIV_RANDOM, DEFAULT_GAME_SETTINGS, isLobbyCiv, type GameSettings };
+export { CIV_COUNT, CIV_RANDOM, DEFAULT_GAME_SETTINGS, isLobbyCiv, isLobbySettings, type GameSettings };
 export const MAX_PLAYERS = 2;
 export const MAX_NAME_LENGTH = 24;
 export const MAX_COMMANDS_PER_BATCH = 256;
 /** A chat message's text: `TXChat` sends at most 255 characters (src/com_hand.cpp:1972-1981; docs/spec/chat.md §3). */
 export const MAX_CHAT_LENGTH = 255;
+
+export type RoomMode = 'multiplayer' | 'single-player';
+export const ROOM_MODES = ['multiplayer', 'single-player'] as const;
+export const DEFAULT_ROOM_MODE: RoomMode = 'multiplayer';
+
+/** Kept aligned with `apps/client/src/bot/types.ts`. */
+export type BotDifficulty = 'easy' | 'medium' | 'hard';
+export const BOT_DIFFICULTIES = ['easy', 'medium', 'hard'] as const;
+export const DEFAULT_BOT_DIFFICULTY: BotDifficulty = 'medium';
+
+export function isRoomMode(value: unknown): value is RoomMode {
+  return value === 'multiplayer' || value === 'single-player';
+}
+
+export function isBotDifficulty(value: unknown): value is BotDifficulty {
+  return value === 'easy' || value === 'medium' || value === 'hard';
+}
+
+export function parseBotDifficulty(value: unknown): BotDifficulty | null {
+  return isBotDifficulty(value) ? value : null;
+}
 
 /** Invite code: 5 characters, no 0/O/1/I/L lookalikes; matched case-insensitively. */
 export const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -35,8 +88,8 @@ export interface TurnBatch {
 // Client -> server
 
 export type ClientMessage =
-  | { t: 'create'; name: string }
-  | { t: 'join'; code: string; name: string }
+  | { t: 'create'; name: string; mode?: RoomMode; difficulty?: BotDifficulty }
+  | { t: 'join'; code: string; name: string; botToken?: string }
   | { t: 'ready'; ready: boolean }
   /** Host only, while not ready: the map type, map size and victory condition (docs/spec/lobby.md §2, §4). */
   | { t: 'settings'; settings: GameSettings }
@@ -65,6 +118,8 @@ export type ClientMessage =
    * Outside the turns: it never reaches the sim. The sender shows its own copy itself.
    */
   | { t: 'chat'; text: string; to: Slot[] }
+  /** Single-player host pause/resume request outside the turn queue (with optional last known epoch). */
+  | { t: 'pause'; paused: boolean; epoch?: number }
   | { t: 'leave' };
 
 // Server -> client
@@ -83,24 +138,30 @@ export type ErrorCode =
   /** The room, slot or token of a `rejoin` is wrong, or the slot was dropped. */
   | 'bad-rejoin'
   /** A ready player's civ, or the settings while the host is ready, cannot change (docs/spec/lobby.md §4). */
-  | 'locked';
+  | 'locked'
+  /** Missing or invalid `botToken` for a single-player room, or caller lacks mode/slot authority. */
+  | 'unauthorized'
+  /** Server-side boundary rejection for invalid mode, difficulty, civ, or game settings. */
+  | 'invalid-settings';
 
 export type EndReason = 'peer-left';
 
 export type ServerMessage =
-  /** Sent on create/join and whenever the lobby changes. `you` is the receiver's slot. */
-  | { t: 'lobby'; code: string; you: Slot; players: PlayerInfo[]; settings: GameSettings }
+  /** Sent on create/join and whenever the lobby changes. `you` is the receiver's slot; `botToken` is only sent to slot 0 host in `'single-player'` mode. */
+  | { t: 'lobby'; code: string; you: Slot; players: PlayerInfo[]; settings: GameSettings; mode?: RoomMode; difficulty?: BotDifficulty; botToken?: string }
   /**
    * The game begins. Every client seeds its sim with `seed` and submits each turn's batch once it has run it. `token`
    * is the receiver's own: it takes the slot back with `rejoin` after a dropped socket. `settings` and each player's
    * `civ` are the lobby's at the start (`lobbyWorldOptions` turns them into the world).
    */
-  | { t: 'start'; seed: number; commandDelay: number; players: PlayerInfo[]; settings: GameSettings; token: string }
+  | { t: 'start'; seed: number; commandDelay: number; players: PlayerInfo[]; settings: GameSettings; token: string; mode?: RoomMode; difficulty?: BotDifficulty }
   /**
    * Answer to a good `rejoin`: the slot is this client's again. `nextTurn` is the first turn the server has no batch
    * of it for: the client sends its batches from there. The released turns it lacks follow as `turn` messages.
    */
-  | { t: 'rejoined'; nextTurn: number }
+  | { t: 'rejoined'; nextTurn: number; mode?: RoomMode; difficulty?: BotDifficulty; paused?: boolean; pauseBoundary?: number; pauseEpoch?: number }
+  /** Authoritative pause/resume state change broadcast to all members in a single-player room. */
+  | { t: 'paused'; paused: boolean; boundary: number; epoch: number }
   /**
    * The player in `slot` stayed away `DROP_AFTER_MS` and is dropped: the server sends a `resign` in its next batch and
    * empty ones after it (`COMM_OTHER_PLAYER_DROPPED`, docs/spec/turn-timing.md §9).

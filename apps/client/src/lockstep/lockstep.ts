@@ -1,6 +1,7 @@
 import { CIV_EGYPTIAN, COMMAND_DELAY_TURNS, DEFAULT_GAME_SETTINGS, lobbyWorldOptions, SINGLE_STEP_TURNS, World, type Command, type GameSettings } from '@aoe/sim';
-import type { ClientMessage, EndReason, SpeedChange, TurnBatch } from '@aoe/protocol';
+import { DEFAULT_ROOM_MODE, type ClientMessage, type EndReason, type ErrorCode, type RoomMode, type SpeedChange, type TurnBatch } from '@aoe/protocol';
 import type { Link } from '../net/link';
+import { PauseControl, type PauseState } from './pause-control';
 
 export interface LockstepStart {
   seed: number;
@@ -13,6 +14,10 @@ export interface LockstepStart {
   civs?: readonly number[];
   /** Room, slot and token to take the slot back with after a broken socket; without it a broken link ends the game. */
   rejoin?: { code: string; slot: number; token: string };
+  /** Authoritative room mode (`'multiplayer'` default). */
+  mode?: RoomMode;
+  /** Protocol slot of this client (0 host, 1 guest/bot). */
+  slot?: number;
   /**
    * Debug only (`?debug=net&map=test`): the fixed test map and its start objects instead of the random map the seed
    * makes. Both clients must ask for it.
@@ -31,6 +36,9 @@ export const NOT_RESPONDING_MS = 25_000;
 
 /** The sync check (`World.syncChecksum`) runs on every 4th turn, as the original's `DoChecksum` does (turn-timing.md §9.1). */
 export const SYNC_INTERVAL_TURNS = 4;
+
+/** Error codes that can reject an in-flight `pause` request; unrelated errors must not clear `pause.pending`. */
+const PAUSE_ERROR_CODES: ReadonlySet<ErrorCode> = new Set(['not-in-room', 'not-started', 'unauthorized', 'locked', 'bad-message']);
 
 export interface Timers {
   set(fn: () => void, ms: number): unknown;
@@ -81,8 +89,16 @@ export class Lockstep {
   onNotResponding: () => void = () => {};
   /** The server dropped the player in `slot` (its next batch resigns it). */
   onDropped: (slot: number) => void = () => {};
+  /** Called whenever authoritative pause state changes. */
+  onPauseChange: (paused: boolean, state: PauseState) => void = () => {};
   /** Total command batches received, per slot (debug and tests). */
   readonly applied: Command[][] = [];
+  /** Synchronized pause controller (single-player host only). */
+  readonly pause: PauseControl;
+  /** Authoritative room mode (`'multiplayer'` default). */
+  readonly mode: RoomMode;
+  /** Protocol slot of this client (0 host, 1 guest/bot). */
+  readonly slot: number;
   /** The server's latest round trip to each slot, ms. */
   rtt: number[] = [];
   /** Each slot's mean frame time as the server last heard it, ms (0 before the first). */
@@ -97,8 +113,7 @@ export class Lockstep {
   private readonly frameMs: () => number;
 
   private get paceScale(): number {
-    const gameSpeed = this.world?.gameSpeed || 1;
-    return 1 / (this.baseSpeed * gameSpeed);
+    return 1 / this.baseSpeed;
   }
   private readonly released = new Map<number, { batches: TurnBatch[]; speed?: SpeedChange }>();
   /** Released turns received so far (the relay releases them in order). */
@@ -126,11 +141,24 @@ export class Lockstep {
     this.timers = timers;
     this.now = now;
     this.frameMs = frameMs;
-    this.baseSpeed = speed;
+    this.baseSpeed = Number.isFinite(speed) && speed > 0 ? speed : 1;
     // A random map game with the lobby's settings and civs: both peers build the same map and start objects from the
     // shared seed (docs/spec/random-maps.md, docs/spec/lobby.md §5).
     const civs = start.civs ?? new Array<number>(start.playerCount).fill(CIV_EGYPTIAN);
     this.world = new World(lobbyWorldOptions(start.seed, start.settings ?? DEFAULT_GAME_SETTINGS, civs, start.testMap));
+    const mode = start.mode ?? DEFAULT_ROOM_MODE;
+    const slot = start.slot ?? start.rejoin?.slot ?? 0;
+    this.mode = mode;
+    this.slot = slot;
+    this.pause = new PauseControl({
+      mode,
+      isHost: slot === 0,
+      send: (msg) => {
+        if (!this.stopped) this.link.send(msg);
+      },
+      isGameOver: () => this.stopped || this.world.gameOver,
+      onChange: (state) => this.onPauseChange(state.paused, state),
+    });
     this.unsubscribe = link.onMessage((m) => {
       if (this.stopped) return;
       if (m.t === 'turn') {
@@ -141,9 +169,44 @@ export class Lockstep {
         this.released.set(m.turn, m.speed ? { batches: m.batches, speed: m.speed } : { batches: m.batches });
         for (const batch of m.batches) (this.applied[batch.slot] ??= []).push(...batch.commands);
         this.pump();
+      } else if (m.t === 'paused') {
+        const wasPaused = this.pause.paused;
+        if (!this.pause.applyPaused(m)) return;
+        this.resumeForResign();
+        if (this.pause.paused) {
+          if (this.isAtPauseBarrier()) {
+            if (this.timer !== undefined) {
+              this.timers.clear(this.timer);
+              this.timer = undefined;
+            }
+            this.settle();
+          }
+        } else if (wasPaused && this.timer === undefined && this.world.turnStep === 0) {
+          const now = this.now();
+          this.boundaryAt = now;
+          this.nextBoundaryAt = now;
+          this.pump();
+        }
       } else if (m.t === 'rejoined') {
         // The batches sent while the socket was down never arrived.
         for (const [turn, batch] of [...this.unreleased].sort((a, b) => a[0] - b[0])) if (turn >= m.nextTurn) link.send(batch);
+        const wasPaused = this.pause.paused;
+        this.pause.applySnapshot(m);
+        this.resumeForResign();
+        if (this.pause.paused) {
+          if (this.isAtPauseBarrier()) {
+            if (this.timer !== undefined) {
+              this.timers.clear(this.timer);
+              this.timer = undefined;
+            }
+            this.settle();
+          }
+        } else if (wasPaused && this.timer === undefined && this.world.turnStep === 0) {
+          const now = this.now();
+          this.boundaryAt = now;
+          this.nextBoundaryAt = now;
+          this.pump();
+        }
       } else if (m.t === 'dropped') {
         this.onDropped(m.slot);
       } else if (m.t === 'ping') {
@@ -159,6 +222,8 @@ export class Lockstep {
       } else if (m.t === 'ended') {
         this.stop();
         this.onEnded(m.reason);
+      } else if (m.t === 'error') {
+        if (PAUSE_ERROR_CODES.has(m.code)) this.pause.clearPending();
       }
     });
     const rejoin = start.rejoin;
@@ -194,6 +259,7 @@ export class Lockstep {
   /** Queue a command; it goes out after the current turn and executes COMMAND_DELAY_TURNS later on both clients. */
   issue(command: Command): void {
     this.pending.push(command);
+    if (command.type === 'resign') this.resumeForResign();
   }
 
   /**
@@ -207,19 +273,61 @@ export class Lockstep {
     this.stop();
   }
 
+  /** Whether the session is currently paused (authoritative). */
+  isPaused(): boolean {
+    return this.pause.paused;
+  }
+
+  /** Whether this client is allowed to toggle pause right now. */
+  canPause(): boolean {
+    return this.pause.canToggle();
+  }
+
+  /** Snapshot of the pause state. */
+  pauseState(): PauseState {
+    return this.pause.state;
+  }
+
+  /** Request a pause toggle (single-player host only). */
+  togglePause(): boolean {
+    return this.pause.toggle();
+  }
+
+  /** Request an explicit pause or resume (single-player host only). */
+  requestPause(paused: boolean): boolean {
+    return this.pause.request(paused);
+  }
+
   stop(): void {
     this.stopped = true;
+    this.pause.clearPending();
     this.unsubscribe();
     this.link.setResume?.(null);
-    if (this.timer !== undefined) this.timers.clear(this.timer);
+    if (this.timer !== undefined) {
+      this.timers.clear(this.timer);
+      this.timer = undefined;
+    }
     this.settle();
+  }
+
+  /** A menu resign must leave the paused queue, even if its pause acknowledgement arrived late. */
+  private resumeForResign(): void {
+    if (this.pause.paused && this.pending.some((c) => c.type === 'resign')) this.pause.request(false);
+  }
+
+  private isAtPauseBarrier(): boolean {
+    return this.pause.paused && this.world.turn >= this.pause.boundary && this.world.turnStep === 0;
   }
 
   /** Run every step that is due, then wait for the next one's time or batch. A late loop catches up at once. */
   private pump(): void {
     if (this.stopped || this.timer !== undefined) return;
     const world = this.world;
-    for (;;) {
+    while (!this.stopped) {
+      if (this.isAtPauseBarrier()) {
+        this.settle();
+        return;
+      }
       const due = world.turnStep === 0 ? this.nextBoundaryAt : this.boundaryAt + (world.turnStep - 1) * world.granularity * this.paceScale;
       const wait = due - this.now();
       if (wait > 0) return this.wait(wait);
@@ -232,6 +340,10 @@ export class Lockstep {
       if (!world.gameOver) this.baseTime += world.granularity;
       if (world.turnStep === 0) {
         this.endTurn(world.turn - 1);
+        if (this.isAtPauseBarrier()) {
+          this.settle();
+          return;
+        }
         // The next boundary comes on the following pass of the game loop: a frame after the last step was due.
         this.nextBoundaryAt = Math.max(due, this.boundaryAt) + this.frameMs() * this.paceScale;
       }

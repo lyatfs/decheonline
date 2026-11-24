@@ -102,7 +102,28 @@ test('1.0, 1.5 and 2.0: game time runs 1.5x and 2x as fast on both clients, the 
         ` base s per real s ${h.base.toFixed(3)}, ${g.base.toFixed(3)}; game per base ${h.speed.toFixed(3)}, ${g.speed.toFixed(3)}; G/F ${h.gf}`,
     );
   }
-  for (const [name, rates] of Object.entries(speeds)) for (const r of rates) expect(r.speed).toBeCloseTo(Number(name), 2);
+  for (const [name, rates] of Object.entries(speeds)) {
+    const expected = Number(name);
+    for (let i = 0; i < rates.length; i++) {
+      const r = rates[i]!;
+      expect(r.speed).toBeCloseTo(expected, 2);
+      // baseTime / realTime is paced independently of gameSpeed (no paceScale /= gameSpeed).
+      expect(r.base).toBeGreaterThan(0.5);
+      expect(r.base).toBeLessThan(1.35);
+      expect(r.base / base[i]!.base).toBeGreaterThan(0.65);
+      expect(r.base / base[i]!.base).toBeLessThan(1.3);
+      // gameTime / realTime scales linearly with gameSpeed (not gameSpeed²).
+      expect(r.real).toBeCloseTo(expected * r.base, 2);
+      const ratioReal = r.real / base[i]!.real;
+      if (expected === 1.5) {
+        expect(ratioReal).toBeGreaterThan(1.1);
+        expect(ratioReal).toBeLessThan(1.9);
+      } else if (expected === 2) {
+        expect(ratioReal).toBeGreaterThan(1.45);
+        expect(ratioReal).toBeLessThan(2.55);
+      }
+    }
+  }
 
   // - steps back down the ladder (one change a second at most).
   await guest.keyboard.press('-');

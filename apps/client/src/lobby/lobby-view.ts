@@ -20,6 +20,8 @@ import {
 import type { LobbyState } from './session';
 import type { Session } from './session';
 import { ageName, civName, englishText, gameName, LABELS, mapSizeName, mapTypeName, pathFindingName, resourcesName, summaryLines, timeLimitName, victoryName, type Text } from './setting-text';
+import { SinglePlayerController } from './single-player-controller';
+import { SinglePlayerSetupView } from './single-player-setup';
 import { AiBot } from '../bot/ai-bot';
 
 const ERROR_TEXT: Record<string, string> = {
@@ -73,8 +75,10 @@ export class LobbyView {
   private bot: AiBot | null = null;
   private botSpawning = false;
   private botGeneration = 0;
-  private autoStartTimer: ReturnType<typeof setTimeout> | null = null;
-  private autoSinglePlayer = false;
+  private spOpen = false;
+  private suppressRender = false;
+  private readonly spController: SinglePlayerController;
+  private readonly spSetup: SinglePlayerSetupView;
   /** The room's chat, kept across redraws: the box of lines and the input. */
   private readonly chatLog = el('div', { className: 'chat-log', testid: 'lobby-chat' });
   private readonly chatInput = el('input', { maxLength: CHAT_LENGTH, testid: 'lobby-chat-input', ariaLabel: 'Chat', autocomplete: 'off' });
@@ -82,8 +86,34 @@ export class LobbyView {
   private readonly chat = el('div', { className: 'chat' }, this.chatTitle, this.chatLog, this.chatInput);
   private inRoom = false;
 
-  constructor(private readonly session: Session) {
-    session.onChange = (state) => this.render(state);
+  constructor(private readonly session: Session, botDebug: { testMap?: boolean; speed?: number } = {}) {
+    this.spController = new SinglePlayerController({
+      session,
+      spawnBot: (code, options) => AiBot.spawn(code, { ...options, ...botDebug }),
+      onStateChange: () => {
+        if (!this.suppressRender) this.render(this.session.state);
+      },
+    });
+    this.spSetup = new SinglePlayerSetupView({
+      onStart: (playerName, setup) => {
+        this.name = playerName.trim() || this.name;
+        this.spController.start(playerName, setup);
+      },
+      onCancel: () => {
+        this.spController.cancel();
+        this.spOpen = false;
+        this.render(this.session.state);
+      },
+    });
+    session.onChange = (state) => {
+      this.suppressRender = true;
+      try {
+        this.spController.onSessionState(state);
+      } finally {
+        this.suppressRender = false;
+      }
+      this.render(state);
+    };
     session.onChat = (line) => this.addChat(line);
     this.chatInput.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || !this.chatInput.value) return;
@@ -99,6 +129,13 @@ export class LobbyView {
    */
   setText(text: Text): void {
     this.text = text;
+    this.spSetup.setText(text);
+  }
+
+  destroy(): void {
+    this.cleanupBot();
+    this.spController.destroy();
+    this.spOpen = false;
   }
 
   render(state: LobbyState): void {
@@ -107,27 +144,19 @@ export class LobbyView {
     if (state.phase === 'lobby' && !this.inRoom) this.chatLog.replaceChildren();
     this.inRoom = state.phase === 'lobby';
 
-    if (state.phase === 'ended' || state.phase === 'idle') {
-      this.cleanupBot();
-      this.autoSinglePlayer = false;
+    if (state.phase === 'playing') {
+      this.spOpen = false;
     }
 
-    if (state.phase === 'lobby' && this.autoSinglePlayer) {
-      if (state.players.length === 1) {
-        this.spawnBot(state.code);
-      }
-      const me = state.players.find((p) => p.slot === state.you);
-      if (me && !me.ready) {
-        this.session.setReady(true);
-      }
-      const everyoneReady = state.players.length === 2 && state.players.every((p) => p.ready);
-      if (everyoneReady && state.you === 0 && this.autoStartTimer === null) {
-        this.autoSinglePlayer = false;
-        this.autoStartTimer = setTimeout(() => {
-          this.autoStartTimer = null;
-          if (this.session.state.phase === 'lobby') this.session.start();
-        }, 300);
-      }
+    if (state.phase === 'ended' || state.phase === 'idle') {
+      this.cleanupBot();
+      if (state.phase === 'ended') this.spOpen = false;
+    }
+
+    if (this.spOpen) {
+      this.spSetup.update(this.spController.state);
+      this.root.replaceChildren(this.spSetup.root);
+      return;
     }
 
     // The chat moves into the new panel; typing in it goes on.
@@ -139,10 +168,6 @@ export class LobbyView {
   private cleanupBot(): void {
     this.botGeneration++;
     this.botSpawning = false;
-    if (this.autoStartTimer !== null) {
-      clearTimeout(this.autoStartTimer);
-      this.autoStartTimer = null;
-    }
     if (this.bot) {
       this.bot.destroy();
       this.bot = null;
@@ -195,17 +220,27 @@ export class LobbyView {
     singlePlayerBtn.style.boxShadow = '0 0 15px rgba(212, 175, 55, 0.4)';
     singlePlayerBtn.addEventListener('click', () => {
       this.cleanupBot();
-      this.autoSinglePlayer = true;
-      this.session.create(this.name);
+      this.spController.cancel();
+      this.spSetup.setPlayerName(this.name);
+      this.spOpen = true;
+      this.render(this.session.state);
     });
 
     const name = el('input', { value: this.name, maxLength: 24, testid: 'name', ariaLabel: 'Your name', placeholder: 'Your name' });
     name.addEventListener('input', () => (this.name = name.value.trim() || 'Player'));
     const code = el('input', { maxLength: 12, placeholder: 'Invite code', testid: 'code', ariaLabel: 'Invite code' });
     const create = el('button', { testid: 'create' }, 'Tạo phòng (Create)');
-    create.addEventListener('click', () => this.session.create(this.name));
+    create.addEventListener('click', () => {
+      this.spOpen = false;
+      this.spController.cancel();
+      this.session.create(this.name);
+    });
     const join = el('button', { testid: 'join' }, 'Vào phòng (Join)');
-    join.addEventListener('click', () => this.session.join(code.value, this.name));
+    join.addEventListener('click', () => {
+      this.spOpen = false;
+      this.spController.cancel();
+      this.session.join(code.value, this.name);
+    });
 
     const skirmish = el('button', { testid: 'skirmish-btn' }, '💥 Hỗn Chiến (Skirmish)');
     skirmish.addEventListener('click', () => {
@@ -249,7 +284,7 @@ export class LobbyView {
     }
     if (state.players.length < 2) {
       list.append(el('li', {}, 'Waiting for a second player...'));
-      if (host && !this.bot && !this.botSpawning) {
+      if (state.mode !== 'single-player' && host && !this.bot && !this.botSpawning) {
         const addBot = el('button', { testid: 'add-bot-btn', className: 'primary' }, '🤖 Thêm Máy (Add AI Bot)');
         addBot.addEventListener('click', () => {
           addBot.disabled = true;
@@ -263,7 +298,8 @@ export class LobbyView {
     const leave = el('button', { testid: 'leave' }, 'Leave');
     leave.addEventListener('click', () => {
       this.cleanupBot();
-      this.autoSinglePlayer = false;
+      this.spController.cancel();
+      this.spOpen = false;
       this.session.leave();
     });
     const box = el(

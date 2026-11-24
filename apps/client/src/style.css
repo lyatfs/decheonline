@@ -224,6 +224,55 @@ button.primary {
   font-style: italic;
   text-align: center;
 }
+#lobby .sp-setup {
+  width: min(36rem, 94vw);
+}
+#lobby .sp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem 1rem;
+  margin-top: 0.75rem;
+}
+#lobby .sp-setup select {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 0.3rem;
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  color: var(--ink);
+  background: #f1e6c6;
+  border: 2px solid var(--stone-dark);
+  border-color: var(--stone-dark) var(--stone-light) var(--stone-light) var(--stone-dark);
+}
+#lobby .sp-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.2rem;
+  margin-top: 0.85rem;
+}
+#lobby .sp-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+#lobby .sp-check input {
+  width: auto;
+  margin: 0;
+}
+#lobby .sp-status {
+  margin: 0.85rem 0 0;
+  font-style: italic;
+  text-align: center;
+  color: var(--ink);
+}
+@media (max-width: 520px) {
+  #lobby .sp-setup {
+    padding: 1rem 1rem 1.4rem;
+  }
+  #lobby .sp-grid {
+    grid-template-columns: 1fr;
+  }
+}
 
 /* Debug panel (?debug=net): a strip at the top right, below the HUD's top strip and clear of the bottom panels. */
 [data-testid='net-debug'] {

@@ -187,8 +187,29 @@ export interface QuickBuildCommand {
   on: boolean;
 }
 
-/** The speeds a player may pick: the + and - keys' ladder and the Game Settings dialog's radio buttons (lobby.md §8). */
+/** The speeds a player may pick in multiplayer: the + and - keys' ladder and the Game Settings dialog's radio buttons (lobby.md §8). */
 export const GAME_SPEEDS = [1, 1.5, 2] as const;
+
+/** Single-player bounded game speed range and UI step. */
+export const SINGLE_PLAYER_SPEED_MIN = 0.5;
+export const SINGLE_PLAYER_SPEED_MAX = 4.0;
+export const SINGLE_PLAYER_SPEED_STEP = 0.25;
+export const DEFAULT_GAME_SPEED = 1.0;
+
+/** True when `speed` is one of the multiplayer whitelist speeds (`[1, 1.5, 2]`). */
+export function isMultiplayerGameSpeed(speed: unknown): speed is (typeof GAME_SPEEDS)[number] {
+  return typeof speed === 'number' && Number.isFinite(speed) && GAME_SPEEDS.includes(speed as (typeof GAME_SPEEDS)[number]);
+}
+
+/** True when `speed` is a finite number within the single-player bounds (`[0.5, 4.0]`). */
+export function isSinglePlayerGameSpeed(speed: unknown): speed is number {
+  return (
+    typeof speed === 'number' &&
+    Number.isFinite(speed) &&
+    speed >= SINGLE_PLAYER_SPEED_MIN &&
+    speed <= SINGLE_PLAYER_SPEED_MAX
+  );
+}
 
 /**
  * Game speed (`TRIBE_Command::command_game_speed`, game command 1, src/tcommand.cpp:773; lobby.md §8): any player sets
@@ -402,10 +423,10 @@ export function parseCommand(v: unknown): Command | null {
       if (typeof o.on !== 'boolean') return null;
       return { type: 'quick-build', on: o.on };
     case 'game-speed': {
-      // A multiplayer game offers only the ladder; 4, 8 and 16 are single-player developer mode (src/scr_game.cpp:3912).
+      // Multiplayer enforces GAME_SPEEDS ([1, 1.5, 2]) on the server; wire parsing accepts bounded finite [0.5, 4.0] for single-player.
       const { speed } = o;
-      if (!GAME_SPEEDS.includes(speed as 1)) return null;
-      return { type: 'game-speed', speed: speed as number };
+      if (!isSinglePlayerGameSpeed(speed)) return null;
+      return { type: 'game-speed', speed };
     }
     case 'relation': {
       const { player, relation } = o;

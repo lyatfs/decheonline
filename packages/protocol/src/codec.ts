@@ -1,5 +1,7 @@
 import { isLobbyCiv, isLobbySettings, parseCommand } from '@aoe/sim';
 import {
+  isBotDifficulty,
+  isRoomMode,
   MAX_CHAT_LENGTH,
   MAX_COMMANDS_PER_BATCH,
   MAX_NAME_LENGTH,
@@ -43,7 +45,7 @@ function commands(v: unknown): Command[] | null {
 }
 
 /** A setting the lobby offers (`isLobbySettings`); unknown fields are dropped. */
-function settings(v: unknown): GameSettings | null {
+export function parseLobbySettings(v: unknown): GameSettings | null {
   if (!isObj(v) || !isObj(v['victory'])) return null;
   const { deathMatch, mapType, mapSize, startingAge, resources, revealMap, fullTechTree, populationLimit, pathFinding, fixedPositions, cheating } = v;
   const { type, amount } = v['victory'];
@@ -74,19 +76,41 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
     case 'create': {
       const name = cleanName(v['name']);
       if (name === null) return fail('bad name');
-      return { ok: true, message: { t: 'create', name } };
+      const modeRaw = v['mode'];
+      if (modeRaw !== undefined && !isRoomMode(modeRaw)) return fail('bad room mode');
+      const diffRaw = v['difficulty'];
+      if (diffRaw !== undefined && !isBotDifficulty(diffRaw)) return fail('bad difficulty');
+      return {
+        ok: true,
+        message: {
+          t: 'create',
+          name,
+          ...(modeRaw !== undefined ? { mode: modeRaw } : {}),
+          ...(modeRaw === 'single-player' && diffRaw !== undefined ? { difficulty: diffRaw } : {}),
+        },
+      };
     }
     case 'join': {
       const name = cleanName(v['name']);
       if (name === null) return fail('bad name');
       if (typeof v['code'] !== 'string' || v['code'].length > 32) return fail('bad code');
-      return { ok: true, message: { t: 'join', code: v['code'], name } };
+      const botToken = v['botToken'];
+      if (botToken !== undefined && (typeof botToken !== 'string' || botToken.length > 64)) return fail('bad bot token');
+      return {
+        ok: true,
+        message: {
+          t: 'join',
+          code: v['code'],
+          name,
+          ...(botToken !== undefined ? { botToken } : {}),
+        },
+      };
     }
     case 'ready':
       if (typeof v['ready'] !== 'boolean') return fail('bad ready flag');
       return { ok: true, message: { t: 'ready', ready: v['ready'] } };
     case 'settings': {
-      const s = settings(v['settings']);
+      const s = parseLobbySettings(v['settings']);
       if (s === null) return fail('bad settings');
       return { ok: true, message: { t: 'settings', settings: s } };
     }
@@ -129,12 +153,34 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
       }
       return { ok: true, message: { t: 'hash', turn: v['turn'], hash: h } };
     }
+    case 'pause': {
+      if (typeof v['paused'] !== 'boolean') return fail('bad pause flag');
+      const epoch = v['epoch'];
+      if (epoch !== undefined && !isTurn(epoch)) return fail('bad pause epoch');
+      return {
+        ok: true,
+        message: epoch !== undefined ? { t: 'pause', paused: v['paused'], epoch } : { t: 'pause', paused: v['paused'] },
+      };
+    }
     default:
       return fail('unknown message tag');
   }
 }
 
-const SERVER_TAGS = new Set(['lobby', 'start', 'rejoined', 'dropped', 'turn', 'ping', 'rtt', 'desync', 'chat', 'ended', 'error']);
+export const SERVER_TAGS: ReadonlySet<string> = new Set<ServerMessage['t']>([
+  'lobby',
+  'start',
+  'rejoined',
+  'dropped',
+  'turn',
+  'paused',
+  'ping',
+  'rtt',
+  'desync',
+  'chat',
+  'ended',
+  'error',
+]);
 
 /** Parse a frame from the server. Checks the tag only; the server is trusted to send well-formed bodies. */
 export function decodeServerMessage(raw: string): Decoded<ServerMessage> {

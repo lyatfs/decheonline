@@ -1,17 +1,40 @@
 import { describe, expect, test } from 'vitest';
-import { parseCommand } from './commands';
+import {
+  DEFAULT_GAME_SPEED,
+  GAME_SPEEDS,
+  SINGLE_PLAYER_SPEED_MAX,
+  SINGLE_PLAYER_SPEED_MIN,
+  SINGLE_PLAYER_SPEED_STEP,
+  isMultiplayerGameSpeed,
+  isSinglePlayerGameSpeed,
+  parseCommand,
+} from './commands';
 import { sampleLobbyReplay, replayWorld, runReplay } from './replay';
 import { VICTORY_SPECIAL } from './victory';
 import { World } from './world';
 
 // Game speed (docs/spec/lobby.md §8): a game command sets `game_speed`; every later step adds `G * game_speed` ms.
 describe('game speed', () => {
-  test('only the ladder 1, 1.5, 2 parses', () => {
-    for (const speed of [1, 1.5, 2]) expect(parseCommand({ type: 'game-speed', speed })).toEqual({ type: 'game-speed', speed });
-    for (const speed of [0, 0.5, 4, 16, '2', Number.NaN]) expect(parseCommand({ type: 'game-speed', speed })).toBeNull();
+  test('bounded finite speeds in [0.5, 4.0] parse; invalid/out-of-range/non-finite are rejected; multiplayer whitelist stays [1, 1.5, 2]', () => {
+    expect([SINGLE_PLAYER_SPEED_MIN, SINGLE_PLAYER_SPEED_MAX, SINGLE_PLAYER_SPEED_STEP, DEFAULT_GAME_SPEED]).toEqual([0.5, 4, 0.25, 1]);
+    expect(GAME_SPEEDS).toEqual([1, 1.5, 2]);
+
+    for (const speed of [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4]) {
+      expect(isSinglePlayerGameSpeed(speed)).toBe(true);
+      expect(parseCommand({ type: 'game-speed', speed })).toEqual({ type: 'game-speed', speed });
+    }
+    for (const speed of [0, -0.5, -1, 0.25, 0.49, 4.01, 16, '2', null, undefined, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(isSinglePlayerGameSpeed(speed)).toBe(false);
+      expect(parseCommand({ type: 'game-speed', speed })).toBeNull();
+    }
+
+    for (const speed of [1, 1.5, 2]) expect(isMultiplayerGameSpeed(speed)).toBe(true);
+    for (const speed of [0.5, 0.75, 1.25, 2.5, 4, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(isMultiplayerGameSpeed(speed)).toBe(false);
+    }
   });
 
-  test.each([1.5, 2])('speed %f multiplies the game time each step adds, from the step the command runs', (speed) => {
+  test.each([0.5, 1.5, 2, 4])('speed %f multiplies the game time each step adds, from the step the command runs', (speed) => {
     const world = new World({ players: 3, randomSeed: 5, victory: { type: VICTORY_SPECIAL } });
     for (let t = 0; t < 8; t++) world.runTurn();
     expect(world.gameSpeed).toBe(1);

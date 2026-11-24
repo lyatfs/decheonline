@@ -4,17 +4,24 @@ import {
   ATTR_HEADROOM,
   ATTR_POPULATION,
   ATTR_POPULATION_LIMIT,
+  COMMAND_DELAY_TURNS,
+  DEFAULT_GAME_SPEED,
   FARM,
   GAME_SPEEDS,
   HOUSE,
   ObjectState,
-  processCheatCode,
+  SINGLE_PLAYER_SPEED_MAX,
+  SINGLE_PLAYER_SPEED_MIN,
+  SINGLE_PLAYER_SPEED_STEP,
   STATUS_LOST,
   STATUS_WON,
-  typeOf,
   UNIT_LEVEL_TRADE,
   UNIT_LEVEL_TRANSPORT,
   UNIT_TYPES,
+  isMultiplayerGameSpeed,
+  isSinglePlayerGameSpeed,
+  processCheatCode,
+  typeOf,
   type Command,
   type Entity,
   type World,
@@ -135,6 +142,14 @@ export interface GameHudOptions {
   game: HudGame;
 }
 
+/** Synchronized pause state & toggle hook for single-player mode. */
+export interface HudPause {
+  readonly allowed: boolean;
+  readonly paused: boolean;
+  toggle(paused?: boolean): boolean;
+  onChange?(handler: (paused: boolean) => void): () => void;
+}
+
 /** What the game screen asks of the multiplayer game. */
 export interface HudGame {
   /** Player names by player number (0 Gaia). */
@@ -155,6 +170,10 @@ export interface HudGame {
   sendChat(text: string, to: number[]): void;
   /** The server's round trip to each slot and each slot's mean frame time, ms: the score display's icons. */
   net(): { rtt: readonly number[]; frameMs: readonly number[] };
+  /** Single-player pause controller (optional; omitted in multiplayer). */
+  pause?: HudPause;
+  /** Single-player bounded speed controls ([0.5, 4.0], step 0.25); defaults to `Boolean(pause?.allowed)`. */
+  singlePlayerSpeed?: boolean;
 }
 
 function box(parent: HTMLElement | null, className: string, testid?: string): HTMLDivElement {
@@ -194,6 +213,8 @@ export class GameHud {
   private readonly minimap = box(this.bottom, 'hud-minimap', 'minimap');
   private readonly message = box(this.root, 'hud-message', 'hud-message');
   private readonly view = box(this.root, 'hud-view', 'hud-view');
+  private readonly pauseBanner = box(this.view, 'hud-paused', 'pause-indicator');
+  private unsubPause: (() => void) | null = null;
   /** The command button grid. */
   readonly commands: CommandPanel;
   /** The minimap, when the HUD has a map view. */
@@ -232,10 +253,13 @@ export class GameHud {
   private readonly onResize = () => this.applyLayout();
   /** `last_game_speed_change`: when + or - last went through. */
   private lastSpeedChange = -Infinity;
+  /** Requested speeds remain pending until their command boundary has run. */
+  private pendingSpeeds: { target: number; turn: number }[] = [];
+  private observedSpeed = DEFAULT_GAME_SPEED;
   /** `char_action` (src/scr_game.cpp:1859-1872): + or = speeds the game up, - slows it down. */
   private readonly onSpeedKey = (e: KeyboardEvent) => {
     const target = e.target as HTMLElement | null;
-    if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
+    if (target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)) return;
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     if (e.key === '+' || e.key === '=') this.commandGameSpeed(true);
     else if (e.key === '-') this.commandGameSpeed(false);
@@ -259,6 +283,12 @@ export class GameHud {
     if (formation >= 0) {
       e.preventDefault();
       this.commandFormation(formation);
+    } else if (e.key === 'F3' && !e.shiftKey && !e.altKey) {
+      if (this.isTextInputTarget(e.target) || this.hasBlockingModal()) return;
+      if (this.o.game.pause?.allowed && !this.gameOver.over && !this.o.world.gameOver) {
+        e.preventDefault();
+        this.togglePause();
+      }
     } else if (e.key === 'F5' && !e.shiftKey) {
       e.preventDefault();
       this.timings.toggle();
@@ -298,8 +328,40 @@ export class GameHud {
     });
     const sounds = o.sounds;
     const click = () => sounds?.button();
-    const speed = { current: () => o.world.gameSpeed, disabled: () => this.gameOver.over, change: (s: number) => this.changeGameSpeed(s) };
-    this.options = sounds ? new OptionsDialog(this.root, o.provider, sounds, speed, o.music ?? null) : null;
+    const speed = {
+      current: () => this.isSinglePlayerSpeed() ? this.requestedGameSpeed() : o.world.gameSpeed,
+      disabled: () => this.gameOver.over,
+      change: (s: number) => this.changeGameSpeed(s),
+      singlePlayer: this.isSinglePlayerSpeed(),
+    };
+    const pauseOption = {
+      allowed: () => Boolean(o.game.pause?.allowed),
+      paused: () => Boolean(o.game.pause?.paused),
+      disabled: () => this.gameOver.over || o.world.gameOver,
+      toggle: () => {
+        this.togglePause();
+      },
+    };
+    this.options = sounds ? new OptionsDialog(this.root, o.provider, sounds, speed, o.music ?? null, pauseOption) : null;
+    this.pauseBanner.textContent = 'PAUSED';
+    this.pauseBanner.hidden = true;
+    Object.assign(this.pauseBanner.style, {
+      position: 'absolute',
+      left: '50%',
+      top: '8px',
+      transform: 'translateX(-50%)',
+      padding: '4px 16px',
+      fontWeight: 'bold',
+      fontSize: '18px',
+      letterSpacing: '0.12em',
+      color: '#fff3c4',
+      background: 'rgba(0, 0, 0, 0.72)',
+      border: '1px solid #e8c766',
+      pointerEvents: 'none',
+      zIndex: '2',
+    });
+    this.unsubPause = o.game.pause?.onChange?.(() => this.updatePauseIndicator()) ?? null;
+    this.updatePauseIndicator();
     this.chat = new ChatLines(this.view);
     this.scores = new ScoreDisplay(this.view, o.world, o.game.names, {
       player: o.player,
@@ -424,6 +486,8 @@ export class GameHud {
 
   destroy(): void {
     this.o.app.ticker.remove(this.tick);
+    this.unsubPause?.();
+    this.unsubPause = null;
     this.menu.close();
     this.chatEntry.close();
     this.diplomacy.close();
@@ -510,20 +574,85 @@ export class GameHud {
    * sound (the issue's); nothing in the game over mode (`game_over`) or with nothing to command.
    */
   commandFormation(formation: number): void {
-    if (this.gameOver.over) return;
+    if (this.gameOver.over || this.o.game.pause?.paused) return;
     const units = this.o.selection.commandObjects(-1);
     if (units.length > 0) this.o.issue({ type: 'formation', units, formation });
   }
 
+  /** Toggle synchronized pause when in single-player mode and game is still running. */
+  togglePause(): boolean {
+    const pause = this.o.game.pause;
+    if (!pause || !pause.allowed || this.gameOver.over || this.o.world.gameOver) return false;
+    const ok = pause.toggle();
+    this.updatePauseIndicator();
+    return ok;
+  }
+
+  private updatePauseIndicator(): void {
+    const pause = this.o.game.pause;
+    this.pauseBanner.hidden = !(pause?.allowed && pause.paused);
+  }
+
+  private isTextInputTarget(target: EventTarget | null): boolean {
+    const active = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+    for (const candidate of [target as HTMLElement | null, active]) {
+      if (!candidate) continue;
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes(candidate.tagName) || candidate.isContentEditable) return true;
+    }
+    return false;
+  }
+
+  private hasBlockingModal(): boolean {
+    return (
+      this.menu.open ||
+      this.chatEntry.open ||
+      this.diplomacy.open ||
+      (this.options?.open ?? false) ||
+      this.achievements !== null ||
+      Boolean(this.root.querySelector?.('.aoe-modal'))
+    );
+  }
+
+  private isSinglePlayerSpeed(): boolean {
+    return this.o.game.singlePlayerSpeed ?? Boolean(this.o.game.pause?.allowed);
+  }
+
+  private requestedGameSpeed(): number {
+    const { world } = this.o;
+    // A change outside this HUD supersedes its optimistic selection.
+    if (world.gameSpeed !== this.observedSpeed && !this.pendingSpeeds.some((s) => s.target === world.gameSpeed)) {
+      this.pendingSpeeds = [];
+    }
+    this.observedSpeed = world.gameSpeed;
+    this.pendingSpeeds = this.pendingSpeeds.filter((s) => world.turn < s.turn || (world.turn === s.turn && world.turnStep === 0));
+    return this.pendingSpeeds.at(-1)?.target ?? world.gameSpeed;
+  }
+
   /**
-   * `command_game_speed` (src/scr_game.cpp:3892-3950; the same in 1.0a): a multiplayer game takes one change a second;
-   * nothing in the game over mode; one step along 1, 1.5, 2, and nothing from a speed off that ladder.
+   * `command_game_speed` (src/scr_game.cpp:3892-3950; the same in 1.0a): a multiplayer game takes one change a second
+   * along 1, 1.5, 2; single-player steps by 0.25 in [0.5, 4.0]; nothing in the game over mode.
    */
   commandGameSpeed(increase: boolean): void {
+    if (this.gameOver.over) return;
+    if (this.isSinglePlayerSpeed()) {
+      const currentRaw = this.requestedGameSpeed();
+      const current = isSinglePlayerGameSpeed(currentRaw) ? currentRaw : DEFAULT_GAME_SPEED;
+      const delta = increase ? SINGLE_PLAYER_SPEED_STEP : -SINGLE_PLAYER_SPEED_STEP;
+      const next = Number(
+        Math.min(
+          SINGLE_PLAYER_SPEED_MAX,
+          Math.max(
+            SINGLE_PLAYER_SPEED_MIN,
+            Math.round((current + delta) / SINGLE_PLAYER_SPEED_STEP) * SINGLE_PLAYER_SPEED_STEP,
+          ),
+        ).toFixed(2),
+      );
+      if (next !== current) this.changeGameSpeed(next);
+      return;
+    }
     const now = performance.now();
     if (now - this.lastSpeedChange < 1000) return;
     this.lastSpeedChange = now;
-    if (this.gameOver.over) return;
     const speeds: readonly number[] = GAME_SPEEDS;
     const i = speeds.indexOf(this.o.world.gameSpeed);
     const next = i < 0 ? undefined : speeds[increase ? i + 1 : i - 1];
@@ -535,6 +664,13 @@ export class GameHud {
    * changes `game_speed` on every peer at the turn it runs (lobby.md §8).
    */
   changeGameSpeed(speed: number): void {
+    if (this.gameOver.over) return;
+    const allowed = this.isSinglePlayerSpeed() ? isSinglePlayerGameSpeed(speed) : isMultiplayerGameSpeed(speed);
+    if (!allowed) return;
+    if (this.isSinglePlayerSpeed()) {
+      this.requestedGameSpeed();
+      this.pendingSpeeds.push({ target: speed, turn: this.o.world.turn + COMMAND_DELAY_TURNS });
+    }
     const { player, game, world } = this.o;
     // Without the pack's strings there is no line to send (the relay takes no empty chat).
     const text = this.o.provider.string(STRING_GAME_SPEED_CHANGED);
@@ -676,6 +812,7 @@ export class GameHud {
   private update(): void {
     const { world, selection, player } = this.o;
     this.gameOver.update();
+    this.updatePauseIndicator();
     this.readLog();
     this.held.update();
     this.scores.update();

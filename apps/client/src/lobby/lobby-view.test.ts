@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { DEFAULT_GAME_SETTINGS } from '@aoe/protocol';
-import { type LobbyState, type Session } from './session';
+import { DEFAULT_GAME_SETTINGS, type ClientMessage, type ServerMessage } from '@aoe/protocol';
+import { Session, type LobbyState } from './session';
 import { LobbyView } from './lobby-view';
 import { AiBot } from '../bot/ai-bot';
 import * as linkModule from '../net/link';
@@ -113,6 +113,33 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
+class FakeLink implements Link {
+  sent: ClientMessage[] = [];
+  private messageHandlers = new Set<(m: ServerMessage) => void>();
+  private closeHandlers = new Set<() => void>();
+
+  send(m: ClientMessage): void {
+    this.sent.push(m);
+  }
+
+  onMessage(fn: (m: ServerMessage) => void): () => void {
+    this.messageHandlers.add(fn);
+    return () => this.messageHandlers.delete(fn);
+  }
+
+  onClose(fn: () => void): void {
+    this.closeHandlers.add(fn);
+  }
+
+  close(): void {
+    for (const fn of this.closeHandlers) fn();
+  }
+
+  receive(m: ServerMessage): void {
+    for (const fn of this.messageHandlers) fn(m);
+  }
+}
+
 function makeSession(initial?: Partial<LobbyState>) {
   const state: LobbyState = {
     phase: 'idle',
@@ -163,33 +190,46 @@ describe('LobbyView & AiBot — Issue 3.6.5: Async AiBot.spawn Race & Lifecycle'
     vi.unstubAllGlobals();
   });
 
-  test('repeated render() during pending AiBot.spawn spawns at most 1 AiBot', async () => {
+  test('clicking single-player opens setup screen and repeated render() during pending AiBot.spawn spawns at most 1 AiBot', async () => {
     const d = deferred<AiBot>();
     const spawnSpy = vi.spyOn(AiBot, 'spawn').mockReturnValue(d.promise);
-    const session = makeSession();
+    const link = new FakeLink();
+    const session = new Session(link);
     const view = new LobbyView(session);
     const root = view.root as unknown as MockElement;
 
     findByTestId(root, 'single-player')!.click();
-    expect(session.create).toHaveBeenCalledTimes(1);
+    // Clicking single-player opens setup screen instead of immediately creating a room
+    expect(link.sent).toHaveLength(0);
+    expect(findByTestId(root, 'sp-setup')).toBeDefined();
 
-    const lobbyState: LobbyState = {
-      phase: 'lobby',
-      code: 'ABCD',
+    findByTestId(root, 'sp-start')!.click();
+    expect(link.sent).toEqual([
+      { t: 'create', name: 'Player', mode: 'single-player', difficulty: 'medium' },
+    ]);
+
+    link.receive({
+      t: 'lobby',
+      code: 'ABCD2',
       you: 0,
       players: [{ slot: 0, name: 'Player', civ: 1, ready: false }],
       settings: DEFAULT_GAME_SETTINGS,
-      error: null,
-    };
-    session.state = lobbyState;
+      mode: 'single-player',
+      difficulty: 'medium',
+      botToken: 'tok-sp',
+    });
 
     // Rapid repeated render calls while AiBot.spawn is still pending
-    view.render(lobbyState);
-    view.render(lobbyState);
-    view.render({ ...lobbyState, players: [{ slot: 0, name: 'Player', civ: 1, ready: true }] });
+    view.render(session.state);
+    view.render(session.state);
 
     expect(spawnSpy).toHaveBeenCalledTimes(1);
-    expect(spawnSpy).toHaveBeenCalledWith('ABCD', 'Computer (Hard)', expect.any(Number));
+    expect(spawnSpy).toHaveBeenCalledWith('ABCD2', {
+      name: 'Computer (Medium)',
+      civ: 2,
+      difficulty: 'medium',
+      botToken: 'tok-sp',
+    });
 
     const mockBot = { destroy: vi.fn() } as unknown as AiBot;
     d.resolve(mockBot);
@@ -199,7 +239,7 @@ describe('LobbyView & AiBot — Issue 3.6.5: Async AiBot.spawn Race & Lifecycle'
     expect(mockBot.destroy).not.toHaveBeenCalled();
   });
 
-  test('add-bot-btn guards against double-click / concurrent spawn while pending', async () => {
+  test('add-bot-btn guards against double-click / concurrent spawn while pending in multiplayer', async () => {
     const d = deferred<AiBot>();
     const spawnSpy = vi.spyOn(AiBot, 'spawn').mockReturnValue(d.promise);
     const session = makeSession();
@@ -212,6 +252,7 @@ describe('LobbyView & AiBot — Issue 3.6.5: Async AiBot.spawn Race & Lifecycle'
       you: 0,
       players: [{ slot: 0, name: 'Host', civ: 1, ready: false }],
       settings: DEFAULT_GAME_SETTINGS,
+      mode: 'multiplayer',
       error: null,
     };
     session.state = lobbyState;
@@ -231,33 +272,37 @@ describe('LobbyView & AiBot — Issue 3.6.5: Async AiBot.spawn Race & Lifecycle'
     await Promise.resolve();
   });
 
-  test('destroys late-resolved AiBot when user leaves or phase ends while spawn is pending, and cancels autoStartTimer', async () => {
+  test('destroys late-resolved AiBot when user cancels while spawn is pending, and multiplayer afterward never auto-readies (U02, U04)', async () => {
     const d1 = deferred<AiBot>();
     const d2 = deferred<AiBot>();
     const spawnSpy = vi.spyOn(AiBot, 'spawn')
       .mockReturnValueOnce(d1.promise)
       .mockReturnValueOnce(d2.promise);
 
-    const session = makeSession();
+    const link = new FakeLink();
+    const session = new Session(link);
     const view = new LobbyView(session);
     const root = view.root as unknown as MockElement;
 
-    // Enter Single Player and reach lobby
+    // Enter Single Player setup and start
     findByTestId(root, 'single-player')!.click();
-    session.state = {
-      phase: 'lobby',
+    findByTestId(root, 'sp-start')!.click();
+    link.receive({
+      t: 'lobby',
       code: 'GAME1',
       you: 0,
       players: [{ slot: 0, name: 'Player', civ: 1, ready: false }],
       settings: DEFAULT_GAME_SETTINGS,
-      error: null,
-    };
-    view.render(session.state);
+      mode: 'single-player',
+      difficulty: 'medium',
+      botToken: 'tok-g1',
+    });
     expect(spawnSpy).toHaveBeenCalledTimes(1);
 
-    // Leave while AiBot.spawn is still pending
-    findByTestId(root, 'leave')!.click();
-    expect(session.leave).toHaveBeenCalledTimes(1);
+    // Cancel while AiBot.spawn is still pending
+    findByTestId(root, 'sp-cancel')!.click();
+    expect(link.sent.at(-1)).toEqual({ t: 'leave' });
+    expect(findByTestId(root, 'sp-setup')).toBeUndefined();
 
     // Late resolution MUST immediately destroy the orphaned bot
     const lateBot = { destroy: vi.fn() } as unknown as AiBot;
@@ -266,17 +311,35 @@ describe('LobbyView & AiBot — Issue 3.6.5: Async AiBot.spawn Race & Lifecycle'
     await Promise.resolve();
     expect(lateBot.destroy).toHaveBeenCalledTimes(1);
 
-    // Entering a new Single Player lobby should cleanly allow spawning a fresh bot
+    // Entering Multiplayer after Single-Player must NEVER auto-ready or auto-start (U04)
+    const beforeMp = link.sent.length;
+    findByTestId(root, 'create')!.click();
+    link.receive({
+      t: 'lobby',
+      code: 'MP123',
+      you: 0,
+      players: [{ slot: 0, name: 'Player', civ: 1, ready: false }],
+      settings: DEFAULT_GAME_SETTINGS,
+      mode: 'multiplayer',
+    });
+    expect(link.sent.slice(beforeMp)).toEqual([{ t: 'create', name: 'Player' }]);
+    expect(findByTestId(root, 'invite-code')).toBeDefined();
+    expect(spawnSpy).toHaveBeenCalledTimes(1);
+    findByTestId(root, 'leave')!.click();
+
+    // Entering a new Single Player setup should cleanly allow spawning a fresh bot
     findByTestId(root, 'single-player')!.click();
-    session.state = {
-      phase: 'lobby',
+    findByTestId(root, 'sp-start')!.click();
+    link.receive({
+      t: 'lobby',
       code: 'GAME2',
       you: 0,
       players: [{ slot: 0, name: 'Player', civ: 1, ready: false }],
       settings: DEFAULT_GAME_SETTINGS,
-      error: null,
-    };
-    view.render(session.state);
+      mode: 'single-player',
+      difficulty: 'medium',
+      botToken: 'tok-g2',
+    });
     expect(spawnSpy).toHaveBeenCalledTimes(2);
 
     const bot2 = { destroy: vi.fn() } as unknown as AiBot;
@@ -284,25 +347,10 @@ describe('LobbyView & AiBot — Issue 3.6.5: Async AiBot.spawn Race & Lifecycle'
     await Promise.resolve();
     await Promise.resolve();
 
-    // Both players ready schedules 300ms auto-start; transitioning to 'ended' cancels timer and destroys bot2
-    session.state = {
-      phase: 'lobby',
-      code: 'GAME2',
-      you: 0,
-      players: [
-        { slot: 0, name: 'Player', civ: 1, ready: true },
-        { slot: 1, name: 'Computer (Hard)', civ: 2, ready: true },
-      ],
-      settings: DEFAULT_GAME_SETTINGS,
-      error: null,
-    };
-    view.render(session.state);
-
-    session.state = { ...session.state, phase: 'ended' };
-    view.render(session.state);
-    vi.advanceTimersByTime(500);
-
-    expect(session.start).not.toHaveBeenCalled();
+    // Transitioning to 'ended' destroys bot2 and does not call start()
+    const beforeEnd = link.sent.length;
+    session.finish();
+    expect(link.sent.slice(beforeEnd).some((m) => m.t === 'start')).toBe(false);
     expect(bot2.destroy).toHaveBeenCalledTimes(1);
   });
 
@@ -310,7 +358,7 @@ describe('LobbyView & AiBot — Issue 3.6.5: Async AiBot.spawn Race & Lifecycle'
     const conn = deferred<Link>();
     vi.spyOn(linkModule, 'connect').mockReturnValue(conn.promise);
 
-    const bot = new AiBot('CODE9', 'Bot', 2);
+    const bot = new AiBot('CODE9', { name: 'Bot', civ: 2, botToken: 'tok-9' });
     const connecting = bot.connect();
     bot.destroy();
 
