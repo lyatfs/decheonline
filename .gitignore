@@ -6,5 +6,6 @@ test-results/
 playwright-report/
 .DS_Store
 
-# Original game files and everything derived from them stay out of git.
-assets-local/
+# Keep local imports private; the runtime pack is shipped with the repo.
+assets-local/*
+!assets-local/pack/
