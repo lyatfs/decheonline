@@ -1,5 +1,24 @@
-import type { BotDifficulty, ErrorCode, GameSettings, PlayerInfo, RoomMode, ServerMessage, Slot } from '@aoe/protocol';
-import { DEFAULT_GAME_SETTINGS, DEFAULT_ROOM_MODE, MAX_CHAT_LENGTH, normalizeCode } from '@aoe/protocol';
+import type {
+  BotDifficulty,
+  CompatibilityVersions,
+  ErrorCode,
+  GameSettings,
+  PlayerInfo,
+  RoomCapacity,
+  RoomMode,
+  RoomSeat,
+  ServerMessage,
+  Slot,
+} from '@aoe/protocol';
+import {
+  DEFAULT_COMPATIBILITY_VERSIONS,
+  DEFAULT_GAME_SETTINGS,
+  DEFAULT_ROOM_CAPACITY,
+  DEFAULT_ROOM_MODE,
+  MAX_CHAT_LENGTH,
+  isRoomCapacity,
+  normalizeCode,
+} from '@aoe/protocol';
 import { track } from '../analytics';
 import type { Link } from '../net/link';
 
@@ -8,6 +27,8 @@ export type StartMessage = Extract<ServerMessage, { t: 'start' }>;
 export interface CreateRoomOptions {
   mode?: RoomMode;
   difficulty?: BotDifficulty;
+  capacity?: RoomCapacity;
+  versions?: CompatibilityVersions;
 }
 
 export interface LobbyState {
@@ -16,6 +37,14 @@ export interface LobbyState {
   /** This client's slot; -1 before joining. */
   you: Slot;
   players: PlayerInfo[];
+  /** Authoritative room seats (`0..capacity - 1`). */
+  seats: RoomSeat[];
+  /** Server-authoritative room capacity (`2` default, or `4`). */
+  capacity: RoomCapacity;
+  /** Server-authoritative host slot (`-1` when idle). */
+  hostSlot: Slot;
+  /** Compatibility versions reported by the server, or `null` when unknown. */
+  versions: CompatibilityVersions | null;
   /** The host's map type, map size and victory condition, as the server last sent them. */
   settings: GameSettings;
   /** Server-authoritative room mode (`'multiplayer'` default). */
@@ -34,15 +63,42 @@ const sameJson = (a: unknown, b: unknown): boolean => {
   return ka.length === Object.keys(b).length && ka.every((k) => sameJson((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
 };
 
+function inferCapacity(players: readonly PlayerInfo[], seats?: readonly RoomSeat[]): RoomCapacity {
+  if (seats && isRoomCapacity(seats.length)) return seats.length;
+  if (players.some((p) => p.slot >= 2) || players.length > 2) return 4;
+  return DEFAULT_ROOM_CAPACITY;
+}
+
+function buildSeats(capacity: RoomCapacity, players: readonly PlayerInfo[]): RoomSeat[] {
+  return Array.from({ length: capacity }, (_, slot) => {
+    const p = players.find((m) => m.slot === slot);
+    if (!p) return { slot, status: 'open', name: null, civ: null, ready: false };
+    return { slot, status: 'occupied', name: p.name, civ: p.civ, ready: p.ready };
+  });
+}
+
+function cloneSeats(seats: readonly RoomSeat[]): RoomSeat[] {
+  return seats.map((s) => ({ ...s }));
+}
+
+function cloneVersions(versions: CompatibilityVersions | null | undefined): CompatibilityVersions | null {
+  return versions ? { ...versions } : null;
+}
+
 /** Lobby logic over a link, no DOM: create/join by code, ready, host start. Gameplay messages belong to lockstep. */
 export class Session {
   /** Settings sent whose echo has not come back, oldest first; while any is pending the shown settings are the local ones. */
   private pendingSettings: GameSettings[] = [];
+  private configuredVersions: CompatibilityVersions | null = null;
   state: LobbyState = {
     phase: 'idle',
     code: '',
     you: -1,
     players: [],
+    seats: [],
+    capacity: DEFAULT_ROOM_CAPACITY,
+    hostSlot: -1,
+    versions: null,
     settings: DEFAULT_GAME_SETTINGS,
     mode: DEFAULT_ROOM_MODE,
     difficulty: undefined,
@@ -56,7 +112,8 @@ export class Session {
   /** Called with each chat line of the room, "Name: text" (`TChat::AddChatMsg`), this player's own included. */
   onChat: (line: string) => void = () => {};
 
-  constructor(private readonly link: Link) {
+  constructor(private readonly link: Link, versions: CompatibilityVersions | null = null) {
+    this.configuredVersions = cloneVersions(versions);
     link.onMessage((m) => this.handle(m));
     link.onClose(() => {
       if (this.state.phase === 'playing') return; // lockstep reports this as the opponent leaving
@@ -66,6 +123,11 @@ export class Session {
         code: '',
         you: -1,
         players: [],
+        seats: [],
+        capacity: DEFAULT_ROOM_CAPACITY,
+        hostSlot: -1,
+        versions: null,
+        settings: DEFAULT_GAME_SETTINGS,
         mode: DEFAULT_ROOM_MODE,
         difficulty: undefined,
         botToken: undefined,
@@ -74,31 +136,64 @@ export class Session {
     });
   }
 
+  setVersions(versions: CompatibilityVersions | null): void {
+    this.configuredVersions = cloneVersions(versions);
+  }
+
+  getLobbyState(): LobbyState {
+    return {
+      ...this.state,
+      players: this.state.players.map((p) => ({ ...p })),
+      seats: cloneSeats(this.state.seats),
+      versions: cloneVersions(this.state.versions),
+      settings: { ...this.state.settings, victory: { ...this.state.settings.victory } },
+      error: this.state.error ? { ...this.state.error } : null,
+    };
+  }
+
   create(name: string, options?: CreateRoomOptions): void {
     this.set({ error: null });
     track('room_create');
     const mode = options?.mode;
     const difficulty = mode === 'single-player' ? options?.difficulty : undefined;
+    const capacity = mode === 'single-player' ? undefined : options?.capacity;
+    const versions =
+      options?.versions ??
+      this.configuredVersions ??
+      (capacity === 4 ? DEFAULT_COMPATIBILITY_VERSIONS : undefined);
     this.link.send({
       t: 'create',
       name,
       ...(mode !== undefined ? { mode } : {}),
       ...(difficulty !== undefined ? { difficulty } : {}),
+      ...(capacity !== undefined ? { capacity } : {}),
+      ...(versions !== undefined ? { versions } : {}),
     });
   }
 
-  join(code: string, name: string, botToken?: string): void {
+  join(code: string, name: string, botToken?: string, versions?: CompatibilityVersions): void {
     this.set({ error: null });
+    const effectiveVersions = versions ?? this.configuredVersions ?? undefined;
     this.link.send({
       t: 'join',
       code: normalizeCode(code),
       name,
       ...(botToken !== undefined ? { botToken } : {}),
+      ...(effectiveVersions !== undefined ? { versions: effectiveVersions } : {}),
     });
   }
 
-  setReady(ready: boolean): void {
-    this.link.send({ t: 'ready', ready });
+  setReady(ready: boolean, versions?: CompatibilityVersions): void {
+    this.set({ error: null });
+    const effectiveVersions =
+      versions ??
+      this.configuredVersions ??
+      (this.state.capacity === 4 ? DEFAULT_COMPATIBILITY_VERSIONS : undefined);
+    this.link.send({
+      t: 'ready',
+      ready,
+      ...(effectiveVersions !== undefined ? { versions: effectiveVersions } : {}),
+    });
   }
 
   /** Host only, while not ready: the game's settings (docs/spec/lobby.md §4). */
@@ -140,6 +235,11 @@ export class Session {
       code: '',
       you: -1,
       players: [],
+      seats: [],
+      capacity: DEFAULT_ROOM_CAPACITY,
+      hostSlot: -1,
+      versions: null,
+      settings: DEFAULT_GAME_SETTINGS,
       mode: DEFAULT_ROOM_MODE,
       difficulty: undefined,
       botToken: undefined,
@@ -153,9 +253,18 @@ export class Session {
     this.pendingSettings = [];
     this.set({
       phase: 'ended',
+      code: '',
+      you: -1,
+      players: [],
+      seats: [],
+      capacity: DEFAULT_ROOM_CAPACITY,
+      hostSlot: -1,
+      versions: null,
+      settings: DEFAULT_GAME_SETTINGS,
       mode: DEFAULT_ROOM_MODE,
       difficulty: undefined,
       botToken: undefined,
+      error: null,
     });
   }
 
@@ -166,11 +275,19 @@ export class Session {
         const answered = this.pendingSettings.findIndex((p) => sameJson(p, m.settings));
         if (answered >= 0) this.pendingSettings.splice(0, answered + 1);
         const mode = m.mode ?? DEFAULT_ROOM_MODE;
+        const capacity = m.capacity ?? inferCapacity(m.players, m.seats);
+        const hostSlot = m.hostSlot ?? 0;
+        const seats = m.seats ? cloneSeats(m.seats) : buildSeats(capacity, m.players);
+        const versions = cloneVersions(m.versions);
         this.set({
           phase: 'lobby',
           code: m.code,
           you: m.you,
           players: m.players,
+          seats,
+          capacity,
+          hostSlot,
+          versions,
           mode,
           difficulty: mode === 'single-player' ? m.difficulty : undefined,
           botToken: mode === 'single-player' ? m.botToken : undefined,
@@ -182,15 +299,32 @@ export class Session {
       case 'start': {
         const mode = m.mode ?? this.state.mode ?? DEFAULT_ROOM_MODE;
         const difficulty = mode === 'single-player' ? (m.difficulty ?? this.state.difficulty) : undefined;
+        const capacity = m.capacity ?? this.state.capacity ?? inferCapacity(m.players);
+        const hostSlot = m.hostSlot ?? (this.state.hostSlot >= 0 ? this.state.hostSlot : 0);
+        const versions = m.versions ? cloneVersions(m.versions) : this.state.versions;
+        const seats = buildSeats(capacity, m.players);
         track('game_start', { map_type: m.settings.mapType, player_count: m.players.length });
-        this.set({ phase: 'playing', players: m.players, settings: m.settings, mode, difficulty });
+        this.set({
+          phase: 'playing',
+          players: m.players,
+          seats,
+          settings: m.settings,
+          mode,
+          difficulty,
+          capacity,
+          hostSlot,
+          versions,
+        });
         this.onStart(m, this.state.you);
         return;
       }
       case 'rejoined': {
         const mode = m.mode ?? this.state.mode ?? DEFAULT_ROOM_MODE;
         const difficulty = mode === 'single-player' ? (m.difficulty ?? this.state.difficulty) : undefined;
-        this.set({ mode, difficulty });
+        const capacity = m.capacity ?? this.state.capacity;
+        const hostSlot = m.hostSlot ?? this.state.hostSlot;
+        const versions = m.versions ? cloneVersions(m.versions) : this.state.versions;
+        this.set({ mode, difficulty, capacity, hostSlot, versions });
         return;
       }
       case 'error':
@@ -207,7 +341,11 @@ export class Session {
   }
 
   private chatLine(slot: Slot, text: string): void {
-    this.onChat(`${this.state.players.find((p) => p.slot === slot)?.name ?? ''}: ${text}`);
+    const name =
+      this.state.players.find((p) => p.slot === slot)?.name ??
+      this.state.seats.find((s) => s.slot === slot)?.name ??
+      '';
+    this.onChat(`${name}: ${text}`);
   }
 
   private set(patch: Partial<LobbyState>): void {

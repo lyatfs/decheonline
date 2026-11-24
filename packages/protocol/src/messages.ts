@@ -38,7 +38,35 @@ export {
 };
 /** The lobby's settings and civs (docs/spec/lobby.md). */
 export { CIV_COUNT, CIV_RANDOM, DEFAULT_GAME_SETTINGS, isLobbyCiv, isLobbySettings, type GameSettings };
-export const MAX_PLAYERS = 2;
+/** Protocol ceiling; each room independently selects its capacity. */
+export const MAX_PLAYERS = 4;
+export type RoomCapacity = 2 | 4;
+export const DEFAULT_ROOM_CAPACITY: RoomCapacity = 2;
+
+export function isRoomCapacity(value: unknown): value is RoomCapacity {
+  return value === 2 || value === 4;
+}
+
+export interface CompatibilityVersions {
+  protocol: string;
+  rules: string;
+  build: string;
+  assets: string;
+}
+
+export const DEFAULT_COMPATIBILITY_VERSIONS: Readonly<CompatibilityVersions> = Object.freeze({
+  protocol: 'mp4-v1', rules: 'sim-v1', build: 'development', assets: 'development',
+});
+
+export function isCompatibilityVersions(value: unknown): value is CompatibilityVersions {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return ['protocol', 'rules', 'build', 'assets'].every((key) => typeof v[key] === 'string' && v[key].length > 0 && v[key].length <= 128);
+}
+
+export function sameCompatibilityVersions(a: CompatibilityVersions, b: CompatibilityVersions): boolean {
+  return a.protocol === b.protocol && a.rules === b.rules && a.build === b.build && a.assets === b.assets;
+}
 export const MAX_NAME_LENGTH = 24;
 export const MAX_COMMANDS_PER_BATCH = 256;
 /** A chat message's text: `TXChat` sends at most 255 characters (src/com_hand.cpp:1972-1981; docs/spec/chat.md §3). */
@@ -69,8 +97,44 @@ export function parseBotDifficulty(value: unknown): BotDifficulty | null {
 export const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 export const CODE_LENGTH = 5;
 
-/** Player slot, 0 or 1. Slot 0 is the room host. */
+/** Stable player seat; the host role is carried separately in `hostSlot`. */
 export type Slot = number;
+export type SlotId = 0 | 1 | 2 | 3;
+export type SeatStatus = 'open' | 'occupied' | 'away' | 'resigned' | 'dropped';
+
+export interface RoomSeat {
+  slot: Slot;
+  status: SeatStatus;
+  name: string | null;
+  civ: number | null;
+  ready: boolean;
+}
+
+export interface MatchParticipant {
+  slot: Slot;
+  playerId: number;
+  name: string;
+  civ: number;
+}
+
+/** Frozen by the server at start and reused unchanged for reconnects. */
+export interface MatchManifest {
+  code: string;
+  capacity: RoomCapacity;
+  mode: RoomMode;
+  hostSlot: Slot;
+  players: MatchParticipant[];
+  seed: number;
+  settings: GameSettings;
+  versions: CompatibilityVersions;
+}
+
+export interface MatchResult {
+  turn: number;
+  hash: number;
+  /** Sim player IDs 1..4; an empty array represents a draw. */
+  winners: number[];
+}
 
 export interface PlayerInfo {
   slot: Slot;
@@ -88,9 +152,9 @@ export interface TurnBatch {
 // Client -> server
 
 export type ClientMessage =
-  | { t: 'create'; name: string; mode?: RoomMode; difficulty?: BotDifficulty }
-  | { t: 'join'; code: string; name: string; botToken?: string }
-  | { t: 'ready'; ready: boolean }
+  | { t: 'create'; name: string; mode?: RoomMode; difficulty?: BotDifficulty; capacity?: RoomCapacity; versions?: CompatibilityVersions }
+  | { t: 'join'; code: string; name: string; botToken?: string; versions?: CompatibilityVersions }
+  | { t: 'ready'; ready: boolean; versions?: CompatibilityVersions }
   /** Host only, while not ready: the map type, map size and victory condition (docs/spec/lobby.md §2, §4). */
   | { t: 'settings'; settings: GameSettings }
   /** This player's civilization, while not ready (docs/spec/lobby.md §3, §4). */
@@ -106,6 +170,8 @@ export type ClientMessage =
   | { t: 'turn'; turn: number; commands: Command[]; frameMs?: number }
   /** Hash of the sim state after executing `turn`. */
   | { t: 'hash'; turn: number; hash: number }
+  /** Agreed sim result; the relay validates agreement before completing a match. */
+  | ({ t: 'result' } & MatchResult)
   /** Answer to the server's `ping` `n`, sent at once. */
   | { t: 'pong'; n: number }
   /**
@@ -142,24 +208,26 @@ export type ErrorCode =
   /** Missing or invalid `botToken` for a single-player room, or caller lacks mode/slot authority. */
   | 'unauthorized'
   /** Server-side boundary rejection for invalid mode, difficulty, civ, or game settings. */
-  | 'invalid-settings';
+  | 'invalid-settings'
+  | 'version-mismatch'
+  | 'bad-result';
 
-export type EndReason = 'peer-left';
+export type EndReason = 'peer-left' | 'completed';
 
 export type ServerMessage =
   /** Sent on create/join and whenever the lobby changes. `you` is the receiver's slot; `botToken` is only sent to slot 0 host in `'single-player'` mode. */
-  | { t: 'lobby'; code: string; you: Slot; players: PlayerInfo[]; settings: GameSettings; mode?: RoomMode; difficulty?: BotDifficulty; botToken?: string }
+  | { t: 'lobby'; code: string; you: Slot; players: PlayerInfo[]; settings: GameSettings; mode?: RoomMode; difficulty?: BotDifficulty; botToken?: string; capacity?: RoomCapacity; hostSlot?: Slot; seats?: RoomSeat[]; versions?: CompatibilityVersions }
   /**
    * The game begins. Every client seeds its sim with `seed` and submits each turn's batch once it has run it. `token`
    * is the receiver's own: it takes the slot back with `rejoin` after a dropped socket. `settings` and each player's
    * `civ` are the lobby's at the start (`lobbyWorldOptions` turns them into the world).
    */
-  | { t: 'start'; seed: number; commandDelay: number; players: PlayerInfo[]; settings: GameSettings; token: string; mode?: RoomMode; difficulty?: BotDifficulty }
+  | { t: 'start'; seed: number; commandDelay: number; players: PlayerInfo[]; settings: GameSettings; token: string; mode?: RoomMode; difficulty?: BotDifficulty; capacity?: RoomCapacity; hostSlot?: Slot; manifest?: MatchManifest; versions?: CompatibilityVersions }
   /**
    * Answer to a good `rejoin`: the slot is this client's again. `nextTurn` is the first turn the server has no batch
    * of it for: the client sends its batches from there. The released turns it lacks follow as `turn` messages.
    */
-  | { t: 'rejoined'; nextTurn: number; mode?: RoomMode; difficulty?: BotDifficulty; paused?: boolean; pauseBoundary?: number; pauseEpoch?: number }
+  | { t: 'rejoined'; nextTurn: number; mode?: RoomMode; difficulty?: BotDifficulty; paused?: boolean; pauseBoundary?: number; pauseEpoch?: number; capacity?: RoomCapacity; hostSlot?: Slot; manifest?: MatchManifest; versions?: CompatibilityVersions }
   /** Authoritative pause/resume state change broadcast to all members in a single-player room. */
   | { t: 'paused'; paused: boolean; boundary: number; epoch: number }
   /**
@@ -168,7 +236,7 @@ export type ServerMessage =
    */
   | { t: 'dropped'; slot: Slot }
   /**
-   * Both batches issued during `turn`, ordered by slot. Released strictly in turn order. `speed`: the step size and
+   * All participant batches issued during `turn`, ordered by slot. Released strictly in turn order. `speed`: the step size and
    * buffer frames the server agreed for turn `speed.turn` (later than `turn + COMMAND_DELAY_TURNS`); give it to the
    * sim when this batch is. `frameMs`: each slot's last reported mean frame time, ms (0 before the first), on every
    * live release as the original carries it on each turn's done message (absent on the turns a rejoin replays).
@@ -186,7 +254,7 @@ export type ServerMessage =
   | { t: 'desync'; turn: number; hashes: number[] }
   /** Player `from`'s chat message to this client (docs/spec/chat.md §3). */
   | { t: 'chat'; from: Slot; text: string }
-  | { t: 'ended'; reason: EndReason }
+  | { t: 'ended'; reason: EndReason; result?: MatchResult }
   | { t: 'error'; code: ErrorCode; message: string };
 
 /**

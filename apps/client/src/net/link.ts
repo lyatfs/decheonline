@@ -26,7 +26,11 @@ const DROP_CODE = 4000;
 
 /** ws(s) URL of the relay on the page's own origin; the dev server proxies `/ws` to the game server. */
 export function relayUrl(loc: Pick<Location, 'protocol' | 'host'> = location): string {
-  return `${loc.protocol === 'https:' ? 'wss' : 'ws'}://${loc.host}/ws`;
+  if (!loc.host) {
+    throw new Error('cannot determine WebSocket relay host from empty location.host');
+  }
+  const scheme = loc.protocol === 'https:' || loc.protocol === 'wss:' ? 'wss' : 'ws';
+  return `${scheme}://${loc.host}/ws`;
 }
 
 /** Opens a socket; resolves once it is open, rejects when it cannot. */

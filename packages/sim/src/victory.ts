@@ -268,6 +268,7 @@ export function lossIfGameOn(v: VictoryState, player: number): void {
 
 /** `RGE_Player::win_game_now` (`src/player.cpp:1037-1052`): the player and its allied-victory team win, everyone else loses. */
 export function winGameNow(v: VictoryState, player: number, d?: DiplomacyState): void {
+  if (v.status[player] === STATUS_LOST) return;
   victoryIfGameOn(v, player);
   const team = teammates(v, d, player);
   for (let i = 1; i < v.status.length; i++) {
@@ -471,6 +472,7 @@ export function checkGameState(v: VictoryState, deltaSeconds: number, attributes
       let best = -1;
       let winner = -1;
       for (let i = 1; i < v.status.length; i++) {
+        if (v.status[i] === STATUS_LOST) continue;
         const team = teammates(v, d, i);
         const score = Math.trunc(team.reduce((sum, j) => sum + v.totals[j]!, v.totals[i]!) / (team.length + 1));
         if (score > best) {
@@ -490,8 +492,8 @@ export function checkGameState(v: VictoryState, deltaSeconds: number, attributes
     const teams: number[][] = [];
     const placed = new Set<number>();
     for (let i = 1; i < v.status.length; i++) {
-      if (placed.has(i)) continue;
-      const team = [i, ...teammates(v, d, i).filter((j) => !placed.has(j))];
+      if (placed.has(i) || v.status[i] === STATUS_LOST) continue;
+      const team = [i, ...teammates(v, d, i).filter((j) => !placed.has(j) && v.status[j] !== STATUS_LOST)];
       for (const j of team) placed.add(j);
       teams.push(team);
     }

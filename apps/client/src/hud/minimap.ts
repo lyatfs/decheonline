@@ -118,13 +118,13 @@ export class Minimap {
       this.flashOn = !this.flashOn;
       this.lastFlash = now;
     }
-    const key = `${world.turn}:${world.turnStep}:${this.flashOn}:${[...units.selected].join()}`;
+    const explored = view.exploredVersion();
+    const key = `${world.turn}:${world.turnStep}:${explored}:${this.flashOn}:${[...units.selected].join()}`;
     const framedAt = `${view.camera.x}:${view.camera.y}`;
     if (key === this.drawnKey && framedAt === this.framedAt) return;
     let redrawn = false;
     if (key !== this.drawnKey) {
       this.drawnKey = key;
-      const explored = view.exploredVersion();
       const fresh = explored !== this.exploredAt && this.exploreTiles();
       this.exploredAt = explored;
       const dots = this.collectDots();
@@ -371,8 +371,10 @@ export class Minimap {
   }
 
   private playerColour(player: number): number {
-    if (!this.art) return FALLBACK_PLAYERS[(player - 1) % FALLBACK_PLAYERS.length]! | 0x1000000;
-    return this.art.playerColour(player) ?? WHITE;
+    if (player <= 0) return WHITE;
+    const fromArt = this.art?.playerColour(player) ?? null;
+    if (fromArt !== null) return fromArt;
+    return FALLBACK_PLAYERS[(player - 1) % FALLBACK_PLAYERS.length]! | 0x1000000;
   }
 
   /**

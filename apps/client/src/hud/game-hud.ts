@@ -405,7 +405,7 @@ export class GameHud {
         Array.from({ length: o.world.players - 1 }, (_, i) => {
           const p = i + 1;
           const gone = o.game.dropped(p);
-          return { player: p, name: o.game.names[p] ?? '', civ: civilizationName(o.provider, o.world.civs[p]!), out: gone || o.world.playerStatus(p) === STATUS_LOST, checkable: p !== o.player && !gone };
+          return { player: p, name: o.game.names[p] ?? '', civ: civilizationName(o.provider, o.world.civs[p] ?? 0), out: gone || o.world.playerStatus(p) === STATUS_LOST, checkable: p !== o.player && !gone };
         }),
       isAlly: (p) => o.world.isAlly(o.player, p),
       isEnemy: (p) => o.world.isEnemy(o.player, p),
@@ -420,7 +420,7 @@ export class GameHud {
       names: o.game.names,
       out: (p) => o.game.dropped(p) || o.world.playerStatus(p) === STATUS_LOST,
       gameOver: () => this.gameOver.over,
-      civ: (p) => civilizationName(o.provider, o.world.civs[p]!),
+      civ: (p) => civilizationName(o.provider, o.world.civs[p] ?? 0),
       issue: o.issue,
       click,
     });
@@ -728,7 +728,7 @@ export class GameHud {
   notResponding(): void {
     const { world, player, provider } = this.o;
     for (let p = 1; p < world.players; p++) {
-      if (p === player || world.playerStatus(p) !== 0) continue;
+      if (p === player || this.o.game.dropped(p) || world.playerStatus(p) !== 0) continue;
       this.o.sounds?.message(SOUND_CHAT);
       this.chat.show(formatName(provider, MESSAGE_NOT_RESPONDING, this.o.game.names[p] ?? ''));
     }
@@ -837,7 +837,7 @@ export class GameHud {
     if (!entity || !type) return;
     const { provider } = this.o;
     // Gaia's objects have no owner line; a player's shows the civilization (the scenario's player name in a campaign).
-    this.objectCiv.textContent = entity.owner !== 0 ? civilizationName(provider, world.civs[entity.owner]!) : '';
+    this.objectCiv.textContent = entity.owner !== 0 ? civilizationName(provider, world.civs[entity.owner] ?? 0) : '';
     this.objectName.textContent = objectName(provider, entity.type, type);
     let info = infoOf(provider, type);
     if ((!info || info.icon < 0) && type.masterType === 30) {
@@ -859,7 +859,7 @@ export class GameHud {
         ? provider.interfaceFrame(
             building ? cultureSlp(SLP.buildingIcons, provider.culture(world.civs[entity.owner] ?? 0)) : SLP.unitIcons,
             info.icon + (building ? facet : 0),
-            entity.owner,
+            entity.owner || 1,
           )
         : null;
     paintFrame(this.objectIcon, icon);

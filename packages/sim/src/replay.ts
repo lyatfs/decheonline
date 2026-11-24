@@ -8,6 +8,8 @@ import { BARRACKS, BOWMAN, CLUBMAN, HOUSE, MARKET, SMALL_WALL, TOWN_CENTER, VILL
 import { VICTORY_TIME_LIMIT, type VictorySettings } from './victory';
 import { AGE_BRONZE, AGE_IRON, startingObjects, World, type RandomMapOptions, type SpeedChange, type StartUnit, type WorldOptions } from './world';
 
+export * from './replay4';
+
 /** Everything needed to rerun a game: start state plus every batch, keyed by the turn it was issued on. */
 export interface ReplayLog {
   players: number;

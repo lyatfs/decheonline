@@ -7,9 +7,13 @@ import {
   DEFAULT_BOT_DIFFICULTY,
   DEFAULT_GAME_SETTINGS,
   DEFAULT_ROOM_MODE,
+  DEFAULT_ROOM_CAPACITY,
+  DEFAULT_COMPATIBILITY_VERSIONS,
   DROP_AFTER_MS,
   MAX_NAME_LENGTH,
-  MAX_PLAYERS,
+  isRoomCapacity,
+  isCompatibilityVersions,
+  sameCompatibilityVersions,
   MAX_TURNS_AHEAD,
   isBotDifficulty,
   isLobbyCiv,
@@ -20,6 +24,10 @@ import {
   normalizeCode,
   parseLobbySettings,
   type BotDifficulty,
+  type RoomCapacity,
+  type CompatibilityVersions,
+  type MatchManifest,
+  type MatchResult,
   type ClientMessage,
   type Command,
   type ErrorCode,
@@ -30,6 +38,7 @@ import {
   type SpeedChange,
   type TurnBatch,
 } from '@aoe/protocol';
+import { freezeSnapshot, openSlot, orderedMembers, roomSeats } from './room-seats';
 import { highLatencyMs, SpeedHost } from './speed';
 
 /** A player is pinged when this long passed since the last ping to it (`CheckPingTime`, turn-timing.md §3.1). */
@@ -48,6 +57,8 @@ export interface TurnRecord {
 }
 
 interface Member {
+  readonly slot: number;
+  versions: CompatibilityVersions | undefined;
   /** Null while the member's socket is away (dropped, not left) in a started game. */
   peer: Peer | null;
   name: string;
@@ -56,6 +67,8 @@ interface Member {
   civ: number;
   /** Next turn this member must submit. */
   nextTurn: number;
+  /** Latest executed turn acknowledged by an accepted batch or a retired observer keepalive. */
+  executedTurn: number;
   /** Submitted but not yet released batches. */
   pending: Map<number, Command[]>;
   hashes: Map<number, number>;
@@ -87,12 +100,18 @@ export class Room {
   /** Every turn released so far, in order. */
   readonly log: TurnRecord[] = [];
   readonly desyncs: number[] = [];
+  readonly comparedHashes = new Set<number>();
+  readonly resultRounds = new Map<number, Map<number, MatchResult>>();
   started = false;
   seed = 0;
   paused = false;
   pauseBoundary = 0;
   pauseEpoch = 0;
   gameOver = false;
+  /** Results cannot predate the execution of any server-known resignation. */
+  resultNotBefore = 0;
+  hostSlot = 0;
+  manifest: MatchManifest | undefined;
   /** The host's map type, map size and victory condition (docs/spec/lobby.md §2). */
   settings: GameSettings = structuredClone(DEFAULT_GAME_SETTINGS);
   /** Step size and buffer frames: the server plays the host (docs/spec/turn-timing.md §8.2). */
@@ -103,10 +122,12 @@ export class Room {
     readonly mode: RoomMode = DEFAULT_ROOM_MODE,
     readonly difficulty?: BotDifficulty,
     readonly botToken?: string,
+    readonly capacity: RoomCapacity = DEFAULT_ROOM_CAPACITY,
+    readonly versions: CompatibilityVersions = DEFAULT_COMPATIBILITY_VERSIONS,
   ) {}
 
   players(): PlayerInfo[] {
-    return this.members.map((m, slot) => ({ slot, name: m.name, ready: m.ready, civ: m.civ }));
+    return orderedMembers(this.members).map((m) => ({ slot: m.slot, name: m.name, ready: m.ready, civ: m.civ }));
   }
 
   broadcast(message: ServerMessage): void {
@@ -115,28 +136,40 @@ export class Room {
 
   /** Each member's round trip and last reported frame time, as the clients' score display reads them. */
   rttMessage(): ServerMessage {
-    return { t: 'rtt', rtt: this.members.map((m) => m.rtt), frameMs: this.members.map((m) => m.frameMs) };
+    return { t: 'rtt', rtt: this.slotMetrics(m => m.rtt), frameMs: this.slotMetrics(m => m.frameMs) };
+  }
+
+  slotMetrics(read: (m: Member) => number): number[] {
+    return Array.from({length:this.capacity}, (_,slot) => {
+      const m = this.members.find(m => m.slot === slot);
+      return m && !m.dropped && !m.resigned ? read(m) : 0;
+    });
   }
 
   sendLobby(): void {
     const players = this.players();
     const extra = this.mode === 'single-player' && this.difficulty !== undefined ? { difficulty: this.difficulty } : {};
-    this.members.forEach((m, you) =>
+    this.members.forEach((m) =>
       m.peer?.send({
         t: 'lobby',
         code: this.code,
-        you,
+        you: m.slot,
+        capacity: this.capacity,
+        hostSlot: this.hostSlot,
+        seats: roomSeats(this.capacity, this.members),
+        versions: this.versions,
         players,
         settings: this.settings,
         mode: this.mode,
         ...extra,
-        ...(this.mode === 'single-player' && you === 0 && !m.isBot && this.botToken ? { botToken: this.botToken } : {}),
+        ...(this.mode === 'single-player' && m.slot === 0 && !m.isBot && this.botToken ? { botToken: this.botToken } : {}),
       }),
     );
   }
 }
 
 export interface RoomRegistryOptions {
+  versions?: CompatibilityVersions;
   /** Override code generation (tests). Must return a normalized, valid code. */
   generateCode?: () => string;
   /** Override the game seed (tests). */
@@ -175,8 +208,10 @@ export class RoomRegistry {
   private readonly schedule: (fn: () => void, ms: number) => () => void;
   private readonly generateCiv: () => number;
   private readonly dropAfterMs: number;
+  private readonly versions: CompatibilityVersions;
 
   constructor(options: RoomRegistryOptions = {}) {
+    this.versions = freezeSnapshot(structuredClone(options.versions ?? DEFAULT_COMPATIBILITY_VERSIONS));
     this.generateCode = options.generateCode ?? randomCode;
     this.generateSeed = options.generateSeed ?? (() => randomInt(2 ** 32));
     this.now = options.now ?? (() => performance.now());
@@ -186,6 +221,10 @@ export class RoomRegistry {
     this.dropAfterMs = options.dropAfterMs ?? DROP_AFTER_MS;
   }
 
+  get compatibilityVersions(): Readonly<CompatibilityVersions> {
+    return this.versions;
+  }
+
   roomOf(peer: Peer): Room | undefined {
     return this.byPeer.get(peer);
   }
@@ -193,9 +232,9 @@ export class RoomRegistry {
   handle(peer: Peer, message: ClientMessage): void {
     switch (message.t) {
       case 'create':
-        return this.create(peer, message.name, message.mode, message.difficulty);
+        return this.create(peer, message.name, message.mode, message.difficulty, message.capacity, message.versions);
       case 'join':
-        return this.join(peer, message.code, message.name, message.botToken);
+        return this.join(peer, message.code, message.name, message.botToken, message.versions);
       case 'rejoin':
         return this.rejoin(peer, message.code, message.slot, message.token, message.received);
       case 'leave':
@@ -205,23 +244,26 @@ export class RoomRegistry {
     }
     const room = this.byPeer.get(peer);
     if (!room) return reject(peer, 'not-in-room', 'join or create a room first');
-    const slot = room.members.findIndex((m) => m.peer === peer);
-    const member = room.members[slot];
+    const member = room.members.find((m) => m.peer === peer);
+    const slot = member?.slot;
     if (!member) return reject(peer, 'not-in-room', 'join or create a room first');
     member.heardAt = this.now();
     if (room.started) this.ping(member, false);
     switch (message.t) {
       case 'ready':
         if (room.started) return reject(peer, 'room-started', 'game already started');
+        if (!this.compatible(room.capacity, message.versions ?? member.versions)) return reject(peer, 'version-mismatch', 'incompatible game versions');
+        if (message.versions) member.versions = structuredClone(message.versions);
         member.ready = message.ready;
         return room.sendLobby();
       case 'settings': {
         if (room.started) return reject(peer, 'room-started', 'game already started');
-        if (slot !== 0) return reject(peer, 'not-host', 'only the host can change the settings');
+        if (slot !== room.hostSlot) return reject(peer, 'not-host', 'only the host can change the settings');
         if (member.ready) return reject(peer, 'locked', 'the settings cannot change while the host is ready');
         const valid = parseLobbySettings(message.settings);
         if (valid === null) return reject(peer, 'invalid-settings', 'invalid game settings');
         room.settings = valid;
+        for (const m of room.members) m.ready = false;
         return room.sendLobby();
       }
       case 'civ':
@@ -233,54 +275,60 @@ export class RoomRegistry {
         member.civ = message.civ;
         return room.sendLobby();
       case 'start':
-        return this.start(room, slot, peer);
+        return this.start(room, member.slot, peer);
       case 'turn':
-        if (message.frameMs !== undefined && room.started) member.frameMs = message.frameMs;
-        return this.submitTurn(room, member, peer, message.turn, message.commands);
+        return this.submitTurn(room, member, peer, message.turn, message.commands, message.frameMs);
       case 'pong':
         return this.pong(room, member, message.n);
       case 'hash':
         return this.reportHash(room, member, peer, message.turn, message.hash);
+      case 'result':
+        return this.reportResult(room, member, peer, message);
       case 'chat':
-        return this.chat(room, slot, message.text, message.to);
+        return this.chat(room, peer, member.slot, message.text, message.to);
       case 'pause':
-        return this.pause(room, member, slot, peer, message.paused, message.epoch);
+        return this.pause(room, member, member.slot, peer, message.paused, message.epoch);
     }
   }
 
-  /**
-   * Remove a peer from its room: a leave message or a socket closed on purpose (`dropped` false), or a socket that broke
-   * (`dropped`). In a started game a broken socket keeps its slot for `rejoin` until `DROP_AFTER_MS` after the server
-   * last heard from it; then the player is dropped (docs/spec/turn-timing.md §9). Leaving ends the game for the others,
-   * unless the player resigned first (Quit Game, `disconnect_multiplayer_game` sends `SendIResignMsg`): then the game
-   * goes on for them, the server filling its batches.
-   */
-  disconnect(peer: Peer, dropped = false): void {
+  /** Preserve match seats after start; only lobby membership can be removed. */
+  disconnect(peer: Peer, broken = false): void {
     const room = this.byPeer.get(peer);
     if (!room) return;
+    const member = room.members.find(m => m.peer === peer);
     this.byPeer.delete(peer);
-    const slot = room.members.findIndex((m) => m.peer === peer);
-    if (room.started && dropped) return this.away(room, room.members[slot]!);
-    const member = room.members[slot]!;
-    if (room.started && member.resigned && room.members.some((m) => m !== member && m.peer !== null)) {
-      member.peer = null;
+    if (!member) return;
+    member.peer = null;
+    member.cancelDrop?.();
+    member.cancelDrop = null;
+    if (room.members.every(m => m.peer === null)) return this.closeRoom(room);
+    if (room.started) {
+      this.transferHost(room);
+      if (broken && !member.resigned && !member.dropped) return this.away(room, member);
+      const wasActive = !member.resigned && !member.dropped;
       member.dropped = true;
-      room.gameOver = true;
+      if (wasActive) this.injectResign(room, member);
+      // An observer leaving after the terminal turn changes no gameplay commands.
+      // Reuse already validated votes: stalled clients cannot emit another endTurn.
+      else if (room.members.every(m => m.resigned || m.dropped) && this.completeAgreedResult(room)) return;
       this.release(room);
       return;
     }
-    room.members.splice(slot, 1);
-    if (room.started) {
-      room.broadcast({ t: 'ended', reason: 'peer-left' });
-      this.closeRoom(room);
-      return;
-    }
-    if (room.members.length === 0) {
-      this.rooms.delete(room.code);
-      return;
-    }
+    room.members.splice(room.members.indexOf(member), 1);
+    if (room.mode === 'single-player' && member.slot === 0) return this.closeRoom(room);
+    this.transferHost(room);
     for (const m of room.members) m.ready = false;
     room.sendLobby();
+  }
+
+  private transferHost(room: Room): void {
+    if (room.members.some(m => m.slot === room.hostSlot && m.peer !== null && !m.isBot)) return;
+    const next = orderedMembers(room.members).find(m => m.peer !== null && !m.isBot);
+    if (next) room.hostSlot = next.slot;
+  }
+
+  private compatible(capacity: RoomCapacity, versions?: CompatibilityVersions): boolean {
+    return versions === undefined ? capacity === 2 : isCompatibilityVersions(versions) && sameCompatibilityVersions(versions, this.versions);
   }
 
   private closeRoom(room: Room): void {
@@ -289,6 +337,7 @@ export class RoomRegistry {
       m.cancelDrop?.();
       m.cancelDrop = null;
     }
+    room.resultRounds.clear();
     this.rooms.delete(room.code);
   }
 
@@ -312,12 +361,26 @@ export class RoomRegistry {
       member.pendingDrop = true;
       return;
     }
+    if (member.resigned || member.dropped) return;
     member.dropped = true;
-    room.gameOver = true;
-    room.broadcast({ t: 'dropped', slot: room.members.indexOf(member) });
+    room.broadcast({ t: 'dropped', slot: member.slot });
+    this.injectResign(room, member);
+    this.release(room);
+  }
+
+  /** The first unaccepted batch follows every command the relay already accepted. */
+  private injectResign(room: Room, member: Member): void {
     member.pending.set(member.nextTurn, [{ type: 'resign' }]);
     member.nextTurn++;
-    this.release(room);
+    this.quorumChanged(room, member.nextTurn - 1);
+    if (room.paused) this.resume(room);
+  }
+
+  private quorumChanged(room: Room, issuedTurn: number): void {
+    room.resultNotBefore = Math.max(room.resultNotBefore, issuedTurn + COMMAND_DELAY_TURNS);
+    // A report made under an earlier voter set cannot finish a reduced quorum.
+    room.resultRounds.clear();
+    this.comparePendingHashes(room);
   }
 
   /** Give a dropped socket's slot back to its client (`rejoin`): the turns it missed follow `rejoined`. */
@@ -325,8 +388,8 @@ export class RoomRegistry {
     if (this.byPeer.has(peer)) return reject(peer, 'already-in-room', 'leave the current room first');
     const code = normalizeCode(rawCode);
     const room = isValidCode(code) ? this.rooms.get(code) : undefined;
-    const member = room?.started ? room.members[slot] : undefined;
-    if (!room || !member || member.dropped || member.token !== token || received > room.log.length) {
+    const member = room?.started ? room.members.find(m => m.slot === slot) : undefined;
+    if (!room || !member || member.dropped || member.resigned || member.token !== token || !Number.isSafeInteger(received) || received < 0 || received > room.log.length) {
       return reject(peer, 'bad-rejoin', 'cannot rejoin that game');
     }
     // A socket that broke without the server noticing yet loses the slot to the new one.
@@ -343,6 +406,10 @@ export class RoomRegistry {
         : {};
     peer.send({
       t: 'rejoined',
+      capacity: room.capacity,
+      hostSlot: room.hostSlot,
+      versions: room.versions,
+      manifest: room.manifest,
       nextTurn: member.nextTurn,
       mode: room.mode,
       ...(room.mode === 'single-player' && room.difficulty !== undefined ? { difficulty: room.difficulty } : {}),
@@ -353,13 +420,16 @@ export class RoomRegistry {
     this.ping(member, true);
   }
 
-  private newMember(peer: Peer, name: string, slot: number, isBot: boolean): Member {
+  private newMember(peer: Peer, name: string, slot: number, isBot: boolean, versions?: CompatibilityVersions): Member {
     return {
+      slot,
+      versions: versions ? structuredClone(versions) : undefined,
       peer,
       name: name === '' ? `Player ${slot + 1}` : name,
       ready: false,
       civ: this.generateCiv(),
       nextTurn: 0,
+      executedTurn: -1,
       pending: new Map(),
       hashes: new Map(),
       rtt: 0,
@@ -376,7 +446,7 @@ export class RoomRegistry {
     };
   }
 
-  private create(peer: Peer, name: string, rawMode?: RoomMode, rawDifficulty?: BotDifficulty): void {
+  private create(peer: Peer, name: string, rawMode?: RoomMode, rawDifficulty?: BotDifficulty, rawCapacity?: RoomCapacity, versions?: CompatibilityVersions): void {
     if (this.byPeer.has(peer)) return reject(peer, 'already-in-room', 'leave the current room first');
     if (typeof name !== 'string' || name.trim().length > MAX_NAME_LENGTH) {
       return reject(peer, 'bad-message', 'invalid player name');
@@ -388,18 +458,21 @@ export class RoomRegistry {
       return reject(peer, 'invalid-settings', 'invalid bot difficulty');
     }
     const mode: RoomMode = rawMode ?? DEFAULT_ROOM_MODE;
+    const capacity = rawCapacity ?? DEFAULT_ROOM_CAPACITY;
+    if (!isRoomCapacity(capacity) || (mode === 'single-player' && capacity !== 2)) return reject(peer, 'invalid-settings', 'invalid room capacity');
+    if (!this.compatible(capacity, versions)) return reject(peer, 'version-mismatch', 'incompatible game versions');
     const difficulty = mode === 'single-player' ? (rawDifficulty ?? DEFAULT_BOT_DIFFICULTY) : undefined;
     const botToken = mode === 'single-player' ? this.generateToken() : undefined;
     let code = this.generateCode();
     while (this.rooms.has(code)) code = this.generateCode();
-    const room = new Room(code, mode, difficulty, botToken);
-    room.members.push(this.newMember(peer, name.trim(), 0, false));
+    const room = new Room(code, mode, difficulty, botToken, capacity, this.versions);
+    room.members.push(this.newMember(peer, name.trim(), 0, false, versions));
     this.rooms.set(code, room);
     this.byPeer.set(peer, room);
     room.sendLobby();
   }
 
-  private join(peer: Peer, rawCode: string, name: string, botToken?: string): void {
+  private join(peer: Peer, rawCode: string, name: string, botToken?: string, versions?: CompatibilityVersions): void {
     if (this.byPeer.has(peer)) return reject(peer, 'already-in-room', 'leave the current room first');
     if (typeof rawCode !== 'string' || rawCode.length > 32) return reject(peer, 'bad-code', 'no room with that invite code');
     if (typeof name !== 'string' || name.trim().length > MAX_NAME_LENGTH) {
@@ -409,32 +482,39 @@ export class RoomRegistry {
     const room = isValidCode(code) ? this.rooms.get(code) : undefined;
     if (!room) return reject(peer, 'bad-code', 'no room with that invite code');
     if (room.started) return reject(peer, 'room-started', 'game already started');
-    if (room.members.length >= MAX_PLAYERS) return reject(peer, 'room-full', 'room is full');
+    if (room.members.length >= room.capacity) return reject(peer, 'room-full', 'room is full');
+    if (!this.compatible(room.capacity, versions)) return reject(peer, 'version-mismatch', 'incompatible game versions');
     if (room.mode === 'single-player') {
       if (!room.botToken || typeof botToken !== 'string' || botToken.length === 0 || botToken !== room.botToken) {
         return reject(peer, 'unauthorized', 'valid bot token required to join single-player room');
       }
     }
     for (const m of room.members) m.ready = false;
-    room.members.push(this.newMember(peer, name.trim(), room.members.length, room.mode === 'single-player'));
+    room.members.push(this.newMember(peer, name.trim(), openSlot(room.capacity, room.members)!, room.mode === 'single-player', versions));
     this.byPeer.set(peer, room);
     room.sendLobby();
   }
 
   private start(room: Room, slot: number, peer: Peer): void {
     if (room.started) return reject(peer, 'room-started', 'game already started');
-    if (slot !== 0) return reject(peer, 'not-host', 'only the host can start');
-    if (room.members.length < MAX_PLAYERS || room.members.some((m) => !m.ready)) {
+    if (slot !== room.hostSlot) return reject(peer, 'not-host', 'only the host can start');
+    if (room.members.length < room.capacity || room.members.some((m) => !m.ready)) {
       return reject(peer, 'not-ready', 'every player must be ready');
     }
+    if (room.members.some(m => !this.compatible(room.capacity, m.versions))) return reject(peer, 'version-mismatch', 'incompatible game versions');
     room.started = true;
     room.seed = this.generateSeed();
+    room.manifest = freezeSnapshot(structuredClone({ code: room.code, capacity: room.capacity, mode: room.mode, hostSlot: room.hostSlot, players: room.players().map(p => ({slot:p.slot, playerId:p.slot+1, name:p.name, civ:p.civ})), seed:room.seed, settings:room.settings, versions:room.versions }));
     const players = room.players();
     const extra = room.mode === 'single-player' && room.difficulty !== undefined ? { difficulty: room.difficulty } : {};
     for (const m of room.members) {
       m.token = this.generateToken();
       m.peer?.send({
         t: 'start',
+        capacity: room.capacity,
+        hostSlot: room.hostSlot,
+        manifest: room.manifest,
+        versions: room.versions,
         seed: room.seed,
         commandDelay: COMMAND_DELAY_TURNS,
         players,
@@ -463,15 +543,27 @@ export class RoomRegistry {
     room.broadcast(room.rttMessage());
   }
 
-  private submitTurn(room: Room, member: Member, peer: Peer, turn: number, commands: Command[]): void {
+  private submitTurn(room: Room, member: Member, peer: Peer, turn: number, commands: Command[], frameMs?: number): void {
     if (!room.started) return reject(peer, 'not-started', 'game has not started');
+    if (!Number.isSafeInteger(turn) || turn < 0) return reject(peer, 'bad-turn', 'invalid turn');
+    if (frameMs !== undefined && (!Number.isInteger(frameMs) || frameMs < 0 || frameMs > 255)) {
+      return reject(peer, 'bad-message', 'invalid frame time');
+    }
+    if (member.resigned || member.dropped) {
+      if (commands.length !== 0) return reject(peer, 'locked', 'resigned players cannot issue commands');
+      // A retired client still runs the released timeline. It cannot acknowledge a boundary
+      // for which the relay has not supplied the delayed batch, or create new batches itself.
+      if (turn > room.log.length + COMMAND_DELAY_TURNS - 1) return reject(peer, 'bad-turn', 'observer turn has not run yet');
+      member.executedTurn = Math.max(member.executedTurn, turn);
+      return;
+    }
     if (turn !== member.nextTurn) {
       return reject(peer, 'bad-turn', `expected turn ${member.nextTurn}, got ${turn}`);
     }
     if (turn - room.log.length >= MAX_TURNS_AHEAD) {
       return reject(peer, 'bad-turn', 'too many unreleased turns');
     }
-    const slot = room.members.indexOf(member);
+    const slot = member.slot;
     for (const command of commands) {
       if (command.type !== 'game-speed') continue;
       if (room.mode === 'single-player') {
@@ -485,11 +577,13 @@ export class RoomRegistry {
         return reject(peer, 'invalid-settings', 'invalid multiplayer game speed');
       }
     }
-    member.pending.set(turn, commands);
+    member.pending.set(turn, structuredClone(commands));
     member.nextTurn++;
+    member.executedTurn = turn;
+    if (frameMs !== undefined) member.frameMs = frameMs;
     if (commands.some((c) => c.type === 'resign')) {
       member.resigned = true;
-      room.gameOver = true;
+      this.quorumChanged(room, turn);
       // A resign must reach the sim even when nobody can manually resume after game over.
       if (room.paused) this.resume(room);
     }
@@ -501,7 +595,7 @@ export class RoomRegistry {
     if (room.mode !== 'single-player' || slot !== 0 || member.isBot) {
       return reject(peer, 'unauthorized', 'only the single-player host can pause');
     }
-    if (room.gameOver) return reject(peer, 'locked', 'cannot pause after game over');
+    if (room.gameOver || room.members.some(m => m.resigned || m.dropped)) return reject(peer, 'locked', 'cannot pause after resignation or game over');
     if (epoch !== undefined && epoch !== room.pauseEpoch) return;
     if (paused === room.paused) return;
 
@@ -521,7 +615,7 @@ export class RoomRegistry {
     room.pauseEpoch += 1;
     room.broadcast({ t: 'paused', paused: false, boundary: room.pauseBoundary, epoch: room.pauseEpoch });
     for (const m of room.members) {
-      if (m.peer === null && !m.dropped) {
+      if (m.peer === null && !m.dropped && !m.resigned) {
         m.pendingDrop = false;
         m.cancelDrop?.();
         m.heardAt = this.now();
@@ -539,16 +633,21 @@ export class RoomRegistry {
     for (;;) {
       const turn = room.log.length;
       if (room.paused && turn + COMMAND_DELAY_TURNS >= room.pauseBoundary) return;
-      if (room.members.some((m) => !m.dropped && !m.pending.has(turn))) return;
-      const batches = room.members.map((m, slot) => ({ slot, commands: m.pending.get(turn) ?? [] }));
+      if (room.members.some((m) => !m.dropped && !m.resigned && !m.pending.has(turn))) return;
+      if (!room.members.some(m => m.pending.has(turn))) return;
+      const batches = orderedMembers(room.members).map((m) => ({ slot: m.slot, commands: m.pending.get(turn) ?? [] }));
       for (const m of room.members) m.pending.delete(turn);
       // Through the relay a round trip between players is the sum of both legs (turn-timing.md §8.3).
-      const latency = highLatencyMs(room.members.reduce((sum, m) => sum + m.rtt, 0));
-      const frameMs = Math.max(...room.members.map((m) => m.frameMs));
+      const active = room.members.filter(m => !m.dropped && !m.resigned);
+      const latency = highLatencyMs(active.map(m => m.rtt).sort((a,b) => b-a).slice(0,2).reduce((sum,rtt) => sum+rtt,0));
+      const frameMs = Math.max(0, ...active.map((m) => m.frameMs));
       const speed = room.speed.boundary(turn + 1, frameMs, latency);
       const record: TurnRecord = speed ? { turn, batches, speed } : { turn, batches };
+      freezeSnapshot(record);
       room.log.push(record);
-      room.broadcast({ t: 'turn', ...record, frameMs: room.members.map((m) => m.frameMs) });
+      this.pruneHashes(room);
+      this.pruneResults(room);
+      room.broadcast({ t: 'turn', ...record, frameMs: room.slotMetrics(m => m.frameMs) });
     }
   }
 
@@ -556,27 +655,103 @@ export class RoomRegistry {
    * A chat message, in the lobby or the game: to each other player in `to` whose socket is here (`TXChat` sends it to
    * the players its `DestPlayers` names; the sender adds its own copy, docs/spec/chat.md §3). Never part of a turn.
    */
-  private chat(room: Room, from: number, text: string, to: number[]): void {
-    for (const slot of new Set(to)) if (slot !== from) room.members[slot]?.peer?.send({ t: 'chat', from, text });
+  private chat(room: Room, peer: Peer, from: number, text: string, to: number[]): void {
+    if (to.some(slot => !Number.isInteger(slot) || slot < 0 || slot >= room.capacity || !room.members.some(m => m.slot === slot))) {
+      return reject(peer, 'bad-message', 'invalid chat recipient');
+    }
+    for (const slot of new Set(to)) if (slot !== from) room.members.find(m => m.slot === slot)?.peer?.send({ t: 'chat', from, text });
+  }
+
+  private pruneResults(room: Room): void {
+    for (const turn of room.resultRounds.keys()) if (turn < room.log.length - MAX_TURNS_AHEAD) room.resultRounds.delete(turn);
+  }
+
+  private reportResult(room: Room, member: Member, peer: Peer, report: MatchResult): void {
+    if (!room.started) return reject(peer, 'not-started', 'game has not started');
+    const { turn, hash, winners } = report;
+    const active = room.members.filter(m => !m.resigned && !m.dropped);
+    // When every sender retired, the remaining original clients must still be able to
+    // confirm the terminal sim result. This does not promote observers back to senders.
+    const voters = active.length > 0 ? active : room.members.filter(m => m.peer !== null);
+    const validPlayers = new Set(room.manifest!.players.map(p => p.playerId));
+    const oldest = Math.max(room.resultNotBefore, 0, room.log.length - MAX_TURNS_AHEAD);
+    const ownHash = member.hashes.get(turn);
+    if (!voters.includes(member) || !Number.isSafeInteger(turn) || turn < oldest ||
+        turn > member.executedTurn || turn > room.log.length + COMMAND_DELAY_TURNS - 1 ||
+        !Number.isInteger(hash) || hash < 0 || hash > 0xffffffff || !Array.isArray(winners) ||
+        new Set(winners).size !== winners.length || winners.some(id => !validPlayers.has(id)) ||
+        (ownHash !== undefined && ownHash !== hash)) {
+      return reject(peer, 'bad-result', 'invalid, premature or unacknowledged match result');
+    }
+    this.pruneResults(room);
+    const normalized = { turn, hash, winners: [...winners].sort((a, b) => a - b) };
+    let round = room.resultRounds.get(turn);
+    if (!round) { round = new Map(); room.resultRounds.set(turn, round); }
+    const previous = round.get(member.slot);
+    if (previous && !sameResult(previous, normalized)) return reject(peer, 'bad-result', 'result already reported for this turn');
+    round.set(member.slot, normalized);
+    this.completeAgreedResult(room);
+  }
+
+  /** Recheck validated votes when a result arrives or a terminal observer disconnects. */
+  private completeAgreedResult(room: Room): boolean {
+    const active = room.members.filter(m => !m.resigned && !m.dropped);
+    const voters = active.length > 0 ? active : room.members.filter(m => m.peer !== null);
+    if (voters.length === 0) return false;
+    for (const [turn, round] of room.resultRounds) {
+      if (turn < room.resultNotBefore) continue;
+      const result = round.get(voters[0]!.slot);
+      if (!result || voters.some(m => !round.has(m.slot) || !sameResult(round.get(m.slot)!, result))) continue;
+      room.gameOver = true;
+      room.broadcast({ t: 'ended', reason: 'completed', result });
+      this.closeRoom(room);
+      return true;
+    }
+    return false;
   }
 
   private reportHash(room: Room, member: Member, peer: Peer, turn: number, hash: number): void {
     if (!room.started) return reject(peer, 'not-started', 'game has not started');
-    // A client reports the hash of turn N just before it submits the batch of turn N (Lockstep.endTurn), so the report
-    // reaches the relay before turn N is released: it is held until the other player's hash arrives.
-    if (turn > member.nextTurn) return reject(peer, 'bad-turn', `turn ${turn} has not run yet`);
-    member.hashes.set(turn, hash);
-    if (room.members.some((m) => !m.dropped && !m.hashes.has(turn))) return;
-    const hashes = room.members.map((m) => m.hashes.get(turn) ?? 0);
-    for (const m of room.members) m.hashes.delete(turn);
-    const reported = hashes.filter((_, slot) => !room.members[slot]!.dropped);
-    if (reported.some((h) => h !== reported[0])) {
-      room.desyncs.push(turn);
-      room.broadcast({ t: 'desync', turn, hashes });
+    if (member.resigned || member.dropped) return;
+    if (!Number.isSafeInteger(turn) || turn < 0 || turn > member.nextTurn || turn > room.log.length + MAX_TURNS_AHEAD) {
+      return reject(peer, 'bad-turn', `turn ${turn} has not run yet`);
     }
+    this.pruneHashes(room);
+    if (turn < room.log.length - MAX_TURNS_AHEAD || room.comparedHashes.has(turn) || member.resigned || member.dropped) return;
+    // The first sample is immutable just as an accepted command batch is.
+    if (!member.hashes.has(turn)) member.hashes.set(turn, hash);
+    this.compareHashes(room, turn);
+  }
+
+  private pruneHashes(room: Room): void {
+    const oldest = room.log.length - MAX_TURNS_AHEAD;
+    for (const m of room.members) for (const turn of m.hashes.keys()) if (turn < oldest) m.hashes.delete(turn);
+    for (const turn of room.comparedHashes) if (turn < oldest) room.comparedHashes.delete(turn);
+  }
+
+  private compareHashes(room: Room, turn: number): void {
+    const active = room.members.filter(m => !m.dropped && !m.resigned);
+    if (active.length === 0 || active.some(m => !m.hashes.has(turn)) || room.comparedHashes.has(turn)) return;
+    const hashes = Array.from({length:room.capacity}, (_,slot) => active.find(m => m.slot === slot)?.hashes.get(turn) ?? 0);
+    const reported = active.map(m => m.hashes.get(turn)!);
+    // Keep bounded samples until pruning so result votes can be checked against them.
+    room.comparedHashes.add(turn);
+    if (reported.some(h => h !== reported[0])) {
+      room.desyncs.push(turn);
+      room.broadcast({t:'desync',turn,hashes});
+    }
+  }
+
+  private comparePendingHashes(room: Room): void {
+    this.pruneHashes(room);
+    for (const turn of new Set(room.members.flatMap(m => [...m.hashes.keys()]))) this.compareHashes(room,turn);
   }
 }
 
 function reject(peer: Peer, code: ErrorCode, message: string): void {
   peer.send({ t: 'error', code, message });
+}
+
+function sameResult(a: MatchResult, b: MatchResult): boolean {
+  return a.turn === b.turn && a.hash === b.hash && a.winners.length === b.winners.length && a.winners.every((id,i) => id === b.winners[i]);
 }

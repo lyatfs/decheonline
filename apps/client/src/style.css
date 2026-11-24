@@ -113,6 +113,34 @@ header h1 {
   min-width: 0;
   text-transform: uppercase;
 }
+#lobby .row input.invite-url-input {
+  text-transform: none;
+}
+#lobby .capacity-row {
+  margin: 0.7rem 0 0;
+}
+#lobby .capacity-row select {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  color: var(--ink);
+  background: #f1e6c6;
+  border: 2px solid var(--stone-dark);
+  border-color: var(--stone-dark) var(--stone-light) var(--stone-light) var(--stone-dark);
+}
+#lobby .invite-link-row {
+  margin: 0 0 0.75rem;
+}
+#lobby .invite-copy-status,
+#lobby .local-origin-warning {
+  margin: 0.25rem 0 0.75rem;
+  font-size: 0.9rem;
+}
+#lobby .invite-copy-status[hidden] {
+  display: none;
+}
 
 button,
 #lobby button {
@@ -157,14 +185,73 @@ button.primary {
 }
 #lobby .players {
   margin: 0;
-  padding: 0.6rem 1rem;
+  padding: 0.6rem 0.85rem;
   list-style: none;
   background: rgba(255, 248, 220, 0.45);
   border: 2px solid var(--stone-dark);
   border-color: var(--stone-dark) var(--stone-light) var(--stone-light) var(--stone-dark);
 }
 #lobby .players li {
-  padding: 0.2rem 0;
+  padding: 0.25rem 0;
+}
+#lobby .seat-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  min-width: 0;
+}
+#lobby .seat-row + .seat-row {
+  border-top: 1px solid rgba(44, 26, 10, 0.14);
+}
+#lobby .seat-color {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.85rem;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.78rem;
+  font-weight: bold;
+  border: 1px solid #000;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+#lobby .seat-color-1 {
+  background: #1b5cd6;
+  color: #fff;
+}
+#lobby .seat-color-2 {
+  background: #c63921;
+  color: #fff;
+}
+#lobby .seat-color-3 {
+  background: #e6d219;
+  color: #2c1a0a;
+}
+#lobby .seat-color-4 {
+  background: #a3734f;
+  color: #fff;
+}
+#lobby .seat-name {
+  font-weight: bold;
+  overflow-wrap: anywhere;
+}
+#lobby .host-badge {
+  font-weight: bold;
+  color: var(--blood);
+}
+#lobby .seat-status {
+  font-size: 0.92rem;
+}
+#lobby .seat-status-open {
+  font-style: italic;
+  color: #5a4a32;
+}
+#lobby .seat-status-away,
+#lobby .seat-status-resigned,
+#lobby .seat-status-dropped {
+  color: var(--blood);
+  font-weight: bold;
 }
 #lobby .players select,
 #lobby .settings select {
@@ -174,6 +261,12 @@ button.primary {
   background: #f1e6c6;
   border: 2px solid var(--stone-dark);
   border-color: var(--stone-dark) var(--stone-light) var(--stone-light) var(--stone-dark);
+  max-width: 100%;
+  min-width: 0;
+}
+#lobby .seat-row select,
+#lobby .seat-row .civ {
+  margin-left: auto;
 }
 #lobby .players .civ {
   font-weight: bold;
@@ -266,6 +359,39 @@ button.primary {
   color: var(--ink);
 }
 @media (max-width: 520px) {
+  header h1 {
+    font-size: 2rem;
+    letter-spacing: 0.08em;
+    text-align: center;
+  }
+  #lobby {
+    max-width: 100vw;
+  }
+  #lobby .panel {
+    width: min(30rem, 96vw);
+    padding: 1rem 0.9rem 1.4rem;
+  }
+  #lobby .row {
+    flex-wrap: wrap;
+  }
+  #lobby .row > * {
+    min-width: 0;
+  }
+  #lobby .invite strong {
+    font-size: 1.5rem;
+    letter-spacing: 0.2em;
+  }
+  #lobby .seat-row select,
+  #lobby .seat-row .civ {
+    margin-left: 0;
+  }
+  #lobby .seat-row select {
+    width: 100%;
+  }
+  #lobby .settings label {
+    flex-wrap: wrap;
+    gap: 0.35rem 0.75rem;
+  }
   #lobby .sp-setup {
     padding: 1rem 1rem 1.4rem;
   }

@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@aoe/assets-import": "*",
     "@aoe/protocol": "*",
     "ws": "^8.23.0"
   },

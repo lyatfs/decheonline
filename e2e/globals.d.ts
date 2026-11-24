@@ -80,6 +80,32 @@ interface Window {
     gameTime(): number;
     baseTime(): number;
     desync(): { turn: number; hashes: number[] } | null;
+    manifest(): {
+      code: string;
+      capacity: 2 | 4;
+      mode: 'multiplayer' | 'single-player';
+      hostSlot: number;
+      players: { slot: number; playerId: number; name: string; civ: number }[];
+      seed: number;
+      settings: Record<string, unknown>;
+      versions: { protocol: string; rules: string; build: string; assets: string };
+    } | null;
+    names(): string[];
+    droppedPlayers(): number[];
+    slot(): number;
+    mode(): 'multiplayer' | 'single-player';
+  };
+  __lobby?: {
+    phase(): 'idle' | 'lobby' | 'playing' | 'ended';
+    code(): string;
+    you(): number;
+    capacity(): number;
+    hostSlot(): number;
+    mode(): 'multiplayer' | 'single-player';
+    players(): { slot: number; name: string; ready: boolean; civ: number }[];
+    seats(): { slot: number; status: 'open' | 'occupied' | 'away' | 'resigned' | 'dropped'; name: string | null; civ: number | null; ready: boolean }[];
+    versions(): { protocol: string; rules: string; build: string; assets: string } | null;
+    error(): { code: string; message: string } | null;
   };
 }
 

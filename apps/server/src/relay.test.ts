@@ -2,7 +2,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { WebSocket } from 'ws';
-import { CODE_LENGTH, DROP_AFTER_MS, isValidCode, type ClientMessage, type ServerMessage } from '@aoe/protocol';
+import { DEFAULT_COMPATIBILITY_VERSIONS, CODE_LENGTH, DROP_AFTER_MS, isValidCode, type ClientMessage, type ServerMessage } from '@aoe/protocol';
 import { createApp } from './app';
 import { PING_INTERVAL_MS, RoomRegistry, type Peer } from './rooms';
 
@@ -239,8 +239,9 @@ describe('rooms', () => {
     const { host, guest, code } = await pair();
     host.send({ t: 'leave' });
     const lobby = await guest.expect('lobby');
-    expect(lobby.you).toBe(0);
-    expect(lobby.players).toEqual([{ slot: 0, name: 'Guest', ready: false, civ: 6 }]);
+    expect(lobby.you).toBe(1);
+    expect(lobby.hostSlot).toBe(1);
+    expect(lobby.players).toEqual([{ slot: 1, name: 'Guest', ready: false, civ: 6 }]);
     guest.send({ t: 'leave' });
     await guest.expectSilence();
     expect(rooms.rooms.has(code)).toBe(false);
@@ -377,13 +378,18 @@ describe('turn relay', () => {
     expect((await host.expect('error')).code).toBe('bad-turn');
   });
 
-  test('a player leaving a started game ends it for the other', async () => {
+  test('a player leaving a started game resigns its seat while the other keeps playing', async () => {
     const { host, guest, code } = await pair();
     await startGame(host, guest);
-    guest.close();
-    expect(await host.next()).toEqual({ t: 'ended', reason: 'peer-left' });
+    guest.send({ t: 'leave' });
+    await guest.expectSilence();
+    host.send({ t: 'turn', turn: 0, commands: [] });
+    expect(await host.expect('turn')).toEqual({ t: 'turn', turn: 0, batches: [{ slot: 0, commands: [] }, { slot: 1, commands: [{ type: 'resign' }] }], frameMs: [0, 0] });
+    host.send({ t: 'turn', turn: 1, commands: [] });
+    expect(await host.expect('turn')).toEqual({ t: 'turn', turn: 1, batches: [{ slot: 0, commands: [] }, { slot: 1, commands: [] }], frameMs: [0, 0] });
     await host.expectSilence();
-    expect(rooms.rooms.has(code)).toBe(false);
+    expect(rooms.rooms.has(code)).toBe(true);
+    host.send({ t: 'leave' }); await host.expectSilence(); expect(rooms.rooms.has(code)).toBe(false);
   });
 
   test('a player who resigned leaves without ending the game: the server fills its batches', async () => {
@@ -423,7 +429,7 @@ describe('rejoin', () => {
 
     const back = await connect();
     back.send({ t: 'rejoin', code: code.toLowerCase(), slot: 1, token: token!, received: 1 });
-    expect(await back.next()).toEqual({ t: 'rejoined', nextTurn: 2, mode: 'multiplayer' });
+    expect(await back.next()).toEqual({ t: 'rejoined', nextTurn: 2, mode: 'multiplayer', capacity: 2, hostSlot: 0, versions: DEFAULT_COMPATIBILITY_VERSIONS, manifest: rooms.rooms.get(code)!.manifest });
     expect(await back.next()).toEqual({ t: 'turn', turn: 1, batches: [{ slot: 0, commands: [] }, { slot: 1, commands: [{ type: 'noop' }] }] });
     expect((await back.expect('rtt')).rtt).toHaveLength(2);
     back.send({ t: 'turn', turn: 2, commands: [] });
@@ -675,7 +681,7 @@ describe('room mode and single-player control (C01-C03)', () => {
     const reconnected = await connect();
     reconnected.send({ t: 'rejoin', code: created.code, slot: 0, token: hostStart.token, received: 1 });
     const rejoined = await reconnected.expect('rejoined');
-    expect(rejoined).toEqual({ t: 'rejoined', nextTurn: 1, mode: 'single-player', difficulty: 'medium' });
+    expect(rejoined).toEqual({ t: 'rejoined', nextTurn: 1, mode: 'single-player', difficulty: 'medium', capacity: 2, hostSlot: 0, versions: DEFAULT_COMPATIBILITY_VERSIONS, manifest: rooms.rooms.get(created.code)!.manifest });
   });
 
   test('C03: boundary validation rejects invalid mode/difficulty/settings/civ and leaves no half-room', async () => {
@@ -959,7 +965,8 @@ describe('synchronized pause channel (Q01-Q05)', () => {
 
     // Quit sends its resign even though the simulation has reached the pause barrier.
     registry.handle(host, { t: 'turn', turn: 2, commands: [{ type: 'resign' }] });
-    expect(room.gameOver).toBe(true);
+    expect(room.gameOver).toBe(false);
+    expect(room.members[0]!.resigned).toBe(true);
     expect(room.paused).toBe(false);
     expect(bot.take('paused')).toEqual([{ t: 'paused', paused: false, boundary: 2, epoch: 2 }]);
     expect(bot.take('turn').map((m) => m.turn)).toEqual([0, 1]);
@@ -987,6 +994,10 @@ describe('synchronized pause channel (Q01-Q05)', () => {
     expect(bot2.take('rejoined')).toEqual([
       {
         t: 'rejoined',
+        capacity: 2,
+        hostSlot: 0,
+        versions: DEFAULT_COMPATIBILITY_VERSIONS,
+        manifest: botStart.manifest,
         nextTurn: 1,
         mode: 'single-player',
         difficulty: 'medium',
@@ -1005,6 +1016,10 @@ describe('synchronized pause channel (Q01-Q05)', () => {
     expect(bot3.take('rejoined')).toEqual([
       {
         t: 'rejoined',
+        capacity: 2,
+        hostSlot: 0,
+        versions: DEFAULT_COMPATIBILITY_VERSIONS,
+        manifest: botStart.manifest,
         nextTurn: 1,
         mode: 'single-player',
         difficulty: 'medium',

@@ -241,7 +241,7 @@ export class DiplomacyDialog {
         radios.push({ player: p, buttons });
       }
       // No tribute buttons in the game over mode, on this player's row, or for a player out of the game (:124-131).
-      if (over || p === player || world.playerStatus(p) !== 0) continue;
+      if (over || p === player || this.o.out(p) || world.playerStatus(p) !== 0) continue;
       const tribute: TributeRow = { player: p, buttons: new Map(), amounts: new Map(COLUMNS.map((c) => [c.resource, 0])) };
       for (const c of COLUMNS) {
         tribute.buttons.set(c.resource, new TributeButton(panel, provider, look, c.x, y, c.frame, `diplomacy-tribute-${c.name}-${p}`, () => this.tribute(tribute, c.resource)));

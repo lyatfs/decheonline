@@ -1,0 +1,550 @@
+{
+  "schema_version": "1.0",
+  "project": "aoe1web-multiplayer4",
+  "repository": "D:/deche/decheonline",
+  "created_on": "2026-11-24",
+  "scope": "User clarified implementation of unfinished backend logic, not binary build; M00–M04 implemented. Focused server verification sequential only. See BACKEND_COMPLETION_2026-11-25.md.",
+  "contract": {
+    "version": "mp4-v1",
+    "status": "frozen",
+    "frozen_by": "M00"
+  },
+  "scheduler": {
+    "max_implementers": 3,
+    "reserved_orchestrator_slots": 1,
+    "states": [
+      "TODO",
+      "READY",
+      "RUNNING",
+      "REVIEW",
+      "DONE",
+      "BLOCKED"
+    ],
+    "initial_state": "TODO",
+    "done_authority": "orchestrator_after_independent_review",
+    "rules": [
+      "dependencies DONE and integrated",
+      "M00 freezes contract before downstream dispatch",
+      "claim named locks and overlapping paths",
+      "validate result.schema.json",
+      "verify actual diff paths and commands, not just worker report",
+      "no auto commit/push/deploy or network/system configuration",
+      "M00 may consume draft contract and use baseline/design evidence instead of fabricated red test"
+    ],
+    "runtime_locks": {
+      "e2e-runtime": {
+        "ports": [
+          5273,
+          8887
+        ],
+        "exclusive": true
+      },
+      "launcher-real-run": {
+        "exclusive": true
+      }
+    },
+    "artifact_root_hint": "C:/Users/Admin/Documents/ChatGPT/SangNguyen/output/multiplayer4-runs/<runId>/<taskId>"
+  },
+  "integration_order": [
+    "M00",
+    "M01",
+    "M02",
+    "M07",
+    "M06",
+    "M03",
+    "M05",
+    "M08",
+    "M09",
+    "M04",
+    "M11",
+    "M10",
+    "M12",
+    "M13",
+    "M14"
+  ],
+  "tasks": [
+    {
+      "id": "M00",
+      "title": "Baseline và contract freeze",
+      "role": "architect",
+      "status": "DONE",
+      "owner": "orchestrator",
+      "base_commit": "7b4da47917bce4be0dd6d9f6aaf92414b773225a",
+      "contract_version": "mp4-v1",
+      "branch_or_worktree": "sang / D:/deche/decheonline",
+      "depends_on": [],
+      "write_globs": [
+        "docs/multiplayer4-harness/**"
+      ],
+      "locks": [
+        "contracts"
+      ],
+      "required_test_ids": [
+        "X01",
+        "X02",
+        "X03"
+      ],
+      "task_brief": "TASKS.md#m00",
+      "result": "BACKEND_COMPLETION_2026-11-25.md",
+      "review": "mp4_review: stage reviews and final focused backend liveness review; no remaining material findings"
+    },
+    {
+      "id": "M01",
+      "title": "Protocol capacity, slots, manifest và versions",
+      "role": "protocol",
+      "status": "DONE",
+      "owner": "mp4_protocol",
+      "base_commit": "7b4da47917bce4be0dd6d9f6aaf92414b773225a",
+      "contract_version": "mp4-v1",
+      "branch_or_worktree": "sang / D:/deche/decheonline",
+      "depends_on": [
+        "M00"
+      ],
+      "write_globs": [
+        "packages/protocol/src/**"
+      ],
+      "locks": [
+        "protocol"
+      ],
+      "required_test_ids": [
+        "C01",
+        "C02",
+        "C03",
+        "C04",
+        "V03"
+      ],
+      "task_brief": "TASKS.md#m01",
+      "result": "BACKEND_COMPLETION_2026-11-25.md",
+      "review": "mp4_review: stage reviews and final focused backend liveness review; no remaining material findings"
+    },
+    {
+      "id": "M02",
+      "title": "Room capacity, stable seats và host role",
+      "role": "room-model",
+      "status": "DONE",
+      "owner": "mp4_rooms",
+      "base_commit": "7b4da47917bce4be0dd6d9f6aaf92414b773225a",
+      "contract_version": "mp4-v1",
+      "branch_or_worktree": "sang / D:/deche/decheonline",
+      "depends_on": [
+        "M01"
+      ],
+      "write_globs": [
+        "apps/server/src/room-seats*.ts",
+        "apps/server/src/rooms.ts",
+        "apps/server/src/relay.test.ts",
+        "apps/server/src/multiplayer4-*.test.ts"
+      ],
+      "locks": [
+        "server-room"
+      ],
+      "required_test_ids": [
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "V04"
+      ],
+      "task_brief": "TASKS.md#m02",
+      "result": "BACKEND_COMPLETION_2026-11-25.md",
+      "review": "mp4_review: stage reviews and final focused backend liveness review; no remaining material findings"
+    },
+    {
+      "id": "M03",
+      "title": "Turn release, RTT, checksum và reconnect4",
+      "role": "netcode",
+      "status": "DONE",
+      "owner": "mp4_rooms",
+      "base_commit": "7b4da47917bce4be0dd6d9f6aaf92414b773225a",
+      "contract_version": "mp4-v1",
+      "branch_or_worktree": "sang / D:/deche/decheonline",
+      "depends_on": [
+        "M02"
+      ],
+      "write_globs": [
+        "apps/server/src/rooms.ts",
+        "apps/server/src/speed*.ts",
+        "apps/server/src/relay.test.ts",
+        "apps/client/src/lockstep/**",
+        "apps/server/src/multiplayer4-*.test.ts"
+      ],
+      "locks": [
+        "server-room",
+        "lockstep"
+      ],
+      "required_test_ids": [
+        "N01",
+        "N02",
+        "N03",
+        "N04",
+        "N05"
+      ],
+      "task_brief": "TASKS.md#m03",
+      "result": "BACKEND_COMPLETION_2026-11-25.md",
+      "review": "mp4_review: stage reviews and final focused backend liveness review; no remaining material findings"
+    },
+    {
+      "id": "M04",
+      "title": "Resign/drop/leave và match termination",
+      "role": "lifecycle",
+      "status": "DONE",
+      "owner": "mp4_rooms",
+      "base_commit": "7b4da47917bce4be0dd6d9f6aaf92414b773225a",
+      "contract_version": "mp4-v1",
+      "branch_or_worktree": "sang / D:/deche/decheonline",
+      "depends_on": [
+        "M03"
+      ],
+      "write_globs": [
+        "apps/server/src/rooms.ts",
+        "apps/server/src/relay.test.ts",
+        "apps/server/src/multiplayer4-*.test.ts"
+      ],
+      "locks": [
+        "server-room"
+      ],
+      "required_test_ids": [
+        "L01",
+        "L02",
+        "L03",
+        "L04",
+        "L05"
+      ],
+      "task_brief": "TASKS.md#m04",
+      "result": "BACKEND_COMPLETION_2026-11-25.md",
+      "review": "mp4_review: stage reviews and final focused backend liveness review; no remaining material findings"
+    },
+    {
+      "id": "M05",
+      "title": "Session và lobby bốn ghế",
+      "role": "lobby",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M01",
+        "M02"
+      ],
+      "write_globs": [
+        "apps/client/src/lobby/session*.ts",
+        "apps/client/src/lobby/index.ts",
+        "apps/client/src/lobby/lobby-view*.ts",
+        "apps/client/src/style.css"
+      ],
+      "locks": [
+        "lobby"
+      ],
+      "required_test_ids": [
+        "U01",
+        "U02",
+        "U03",
+        "U04"
+      ],
+      "task_brief": "TASKS.md#m05",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M06",
+      "title": "Link mời và entry module",
+      "role": "invite",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M01",
+        "M02"
+      ],
+      "write_globs": [
+        "apps/client/src/lobby/invite-link*.ts"
+      ],
+      "locks": [
+        "invite-module"
+      ],
+      "required_test_ids": [
+        "I01",
+        "I02",
+        "I03",
+        "I04",
+        "I05"
+      ],
+      "task_brief": "TASKS.md#m06",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M07",
+      "title": "Sim/map/victory/replay bốn người",
+      "role": "sim-map",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M01"
+      ],
+      "write_globs": [
+        "packages/sim/src/world*.ts",
+        "packages/sim/src/game-settings*.ts",
+        "packages/sim/src/rmm-controller*.ts",
+        "packages/sim/src/replay*.ts",
+        "packages/sim/src/victory*.ts",
+        "packages/sim/src/diplomacy*.ts"
+      ],
+      "locks": [
+        "simulation"
+      ],
+      "required_test_ids": [
+        "W01",
+        "W02",
+        "W03",
+        "W04",
+        "W05"
+      ],
+      "task_brief": "TASKS.md#m07",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M08",
+      "title": "HUD và asset audit owner1..4",
+      "role": "presentation",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M01",
+        "M07"
+      ],
+      "write_globs": [
+        "apps/client/src/hud/**",
+        "tools/assets-import/src/multiplayer-audit*.ts"
+      ],
+      "locks": [
+        "hud-assets"
+      ],
+      "required_test_ids": [
+        "H01",
+        "H02",
+        "H03",
+        "H04",
+        "V02"
+      ],
+      "task_brief": "TASKS.md#m08",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M09",
+      "title": "Production host launcher LAN",
+      "role": "host-tooling",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M00"
+      ],
+      "write_globs": [
+        "tools/host/**",
+        "Chay-May-Chu.cmd",
+        "docs/multiplayer4-hosting.md"
+      ],
+      "locks": [
+        "host-tooling",
+        "launcher-real-run"
+      ],
+      "required_test_ids": [
+        "O01",
+        "O02",
+        "O03",
+        "O04"
+      ],
+      "task_brief": "TASKS.md#m09",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M10",
+      "title": "Client integration và version gate",
+      "role": "client-integrator",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M03",
+        "M04",
+        "M05",
+        "M06",
+        "M07",
+        "M08",
+        "M11"
+      ],
+      "write_globs": [
+        "apps/client/src/multiplayer.ts",
+        "apps/client/src/main.ts",
+        "apps/client/src/net/link.ts",
+        "e2e/globals.d.ts",
+        "apps/client/src/lobby/invite-link*.ts",
+        "apps/client/src/lobby/lobby-view*.ts",
+        "apps/client/src/lobby/session*.ts"
+      ],
+      "locks": [
+        "client-entry",
+        "lobby",
+        "invite-module",
+        "e2e-globals"
+      ],
+      "required_test_ids": [
+        "U05",
+        "I06",
+        "V01",
+        "N06"
+      ],
+      "task_brief": "TASKS.md#m10",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M11",
+      "title": "Server hosting integration và packaging",
+      "role": "server-integrator",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M04",
+        "M08",
+        "M09"
+      ],
+      "write_globs": [
+        "apps/server/src/app*.ts",
+        "apps/server/src/assets.ts",
+        "apps/server/src/main.ts",
+        "package.json",
+        "package-lock.json",
+        "tools/host/**"
+      ],
+      "locks": [
+        "server-app",
+        "host-tooling",
+        "package-config",
+        "launcher-real-run"
+      ],
+      "required_test_ids": [
+        "O06",
+        "V02"
+      ],
+      "task_brief": "TASKS.md#m11",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M12",
+      "title": "Tunnel Internet opt-in",
+      "role": "tunnel-tooling",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M11"
+      ],
+      "write_globs": [
+        "tools/host/**",
+        "docs/multiplayer4-hosting.md"
+      ],
+      "locks": [
+        "host-tooling",
+        "launcher-real-run"
+      ],
+      "required_test_ids": [
+        "O07",
+        "O08"
+      ],
+      "task_brief": "TASKS.md#m12",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M13",
+      "title": "E2E bốn client và non-regression",
+      "role": "qa-integration",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M10",
+        "M11",
+        "M12"
+      ],
+      "write_globs": [
+        "e2e/tests/multiplayer4-*.spec.ts",
+        "e2e/multiplayer4-helpers.ts"
+      ],
+      "locks": [
+        "e2e-runtime"
+      ],
+      "required_test_ids": [
+        "A01",
+        "A02",
+        "A03",
+        "A04",
+        "A05",
+        "O05"
+      ],
+      "task_brief": "TASKS.md#m13",
+      "result": null,
+      "review": null
+    },
+    {
+      "id": "M14",
+      "title": "Soak, thực địa và bàn giao",
+      "role": "qa-reviewer",
+      "status": "TODO",
+      "owner": null,
+      "base_commit": null,
+      "contract_version": null,
+      "branch_or_worktree": null,
+      "depends_on": [
+        "M13"
+      ],
+      "write_globs": [
+        "docs/multiplayer4-acceptance.md",
+        "e2e/tests/multiplayer4-soak.spec.ts",
+        "e2e/playwright.multiplayer4-soak.config.ts",
+        "e2e/multiplayer4-helpers.ts"
+      ],
+      "locks": [
+        "e2e-runtime",
+        "launcher-real-run"
+      ],
+      "required_test_ids": [
+        "A06",
+        "A07",
+        "A08",
+        "A09",
+        "O09"
+      ],
+      "task_brief": "TASKS.md#m14",
+      "result": null,
+      "review": null
+    }
+  ]
+}

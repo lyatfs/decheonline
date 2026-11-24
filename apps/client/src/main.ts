@@ -2,8 +2,10 @@ import './style.css';
 import { Application } from 'pixi.js';
 import { createAssetProvider } from './assets';
 import { renderAssetsDebug, type DebugViewReport } from './assets/debug-view';
+import { copyInviteUrl, inviteUrl, isLocalhostOrigin, parseInviteRoom } from './lobby/invite-link';
 import { exposeMapDebug, MapView } from './map';
 import { startMultiplayer } from './multiplayer';
+import { getClientVersions } from './net/version-gate';
 import { startSkirmish } from './skirmish';
 import { createTestMap } from '@aoe/sim';
 import { GAME_TITLE } from './title';
@@ -14,7 +16,29 @@ declare global {
   }
 }
 
-async function main(): Promise<void> {
+export function readStartupInviteCode(href: string): string | undefined {
+  return parseInviteRoom(href) ?? undefined;
+}
+
+export function buildClientInviteHooks(origin: string): {
+  buildInviteUrl: (code: string) => string | null;
+  copyInvite: (url: string) => Promise<{ copied: boolean; method: string } | boolean>;
+  isLocalOrigin: (candidateOrigin: string) => boolean;
+} {
+  return {
+    buildInviteUrl: (code: string) => {
+      try {
+        return inviteUrl(origin, code);
+      } catch {
+        return null;
+      }
+    },
+    copyInvite: (url: string) => copyInviteUrl(url),
+    isLocalOrigin: (candidateOrigin: string) => isLocalhostOrigin(candidateOrigin),
+  };
+}
+
+export async function main(): Promise<void> {
   const host = document.getElementById('game');
   if (!host) throw new Error('missing #game element');
 
@@ -68,6 +92,7 @@ async function main(): Promise<void> {
     const list = (params.get(name) ?? '').split(',').filter((s) => s !== '').map(Number);
     return list.length > 0 && list.every((n) => Number.isInteger(n) && n >= 0) ? list : undefined;
   };
+  const inviteHooks = buildClientInviteHooks(window.location.origin);
   await startMultiplayer(lobbyHost, app, {
     debug: params.get('debug') === 'net',
     speed: Number(params.get('speed') ?? 1) || 1,
@@ -84,8 +109,11 @@ async function main(): Promise<void> {
     testMap: params.get('map') === 'test',
     seed: params.has('seed') && Number.isInteger(Number(params.get('seed'))) ? Number(params.get('seed')) : undefined,
     perturb: params.has('perturb') && Number.isInteger(Number(params.get('perturb'))) ? Number(params.get('perturb')) : undefined,
+    initialRoomCode: readStartupInviteCode(window.location.href),
+    ...inviteHooks,
+    clientVersions: getClientVersions(),
     setGameVisible,
   });
 }
 
-void main();
+if (typeof document !== 'undefined') void main();

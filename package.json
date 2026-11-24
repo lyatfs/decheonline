@@ -23,7 +23,7 @@
     "assets:import": "npm run import -w @aoe/assets-import",
     "assets:custom-units": "node tools/custom-units/pack_from_assets_zip.cjs",
     "lint": "eslint .",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc -p tools/host/tsconfig.json --noEmit",
     "test": "npm run test --workspaces --if-present",
     "test:golden": "npm run test:golden --workspaces --if-present",
     "test:e2e": "cd e2e && playwright test",

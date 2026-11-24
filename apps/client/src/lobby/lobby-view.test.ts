@@ -146,6 +146,10 @@ function makeSession(initial?: Partial<LobbyState>) {
     code: '',
     you: -1,
     players: [],
+    seats: [],
+    capacity: 2,
+    hostSlot: -1,
+    versions: null,
     settings: DEFAULT_GAME_SETTINGS,
     error: null,
     ...initial,
@@ -155,6 +159,8 @@ function makeSession(initial?: Partial<LobbyState>) {
     onChange: (() => {}) as (state: LobbyState) => void,
     onStart: () => {},
     onChat: () => {},
+    setVersions: vi.fn(),
+    getLobbyState: () => session.state,
     create: vi.fn(),
     join: vi.fn(),
     setReady: vi.fn(),
@@ -163,7 +169,17 @@ function makeSession(initial?: Partial<LobbyState>) {
     sendChat: vi.fn(),
     start: vi.fn(),
     leave: vi.fn(() => {
-      session.state = { ...session.state, phase: 'idle', code: '', you: -1, players: [] };
+      session.state = {
+        ...session.state,
+        phase: 'idle',
+        code: '',
+        you: -1,
+        players: [],
+        seats: [],
+        capacity: 2,
+        hostSlot: -1,
+        versions: null,
+      };
       session.onChange(session.state);
     }),
   };
@@ -251,6 +267,13 @@ describe('LobbyView & AiBot — Issue 3.6.5: Async AiBot.spawn Race & Lifecycle'
       code: 'ROOM1',
       you: 0,
       players: [{ slot: 0, name: 'Host', civ: 1, ready: false }],
+      seats: [
+        { slot: 0, status: 'occupied', name: 'Host', civ: 1, ready: false },
+        { slot: 1, status: 'open', name: null, civ: null, ready: false },
+      ],
+      capacity: 2,
+      hostSlot: 0,
+      versions: null,
       settings: DEFAULT_GAME_SETTINGS,
       mode: 'multiplayer',
       error: null,

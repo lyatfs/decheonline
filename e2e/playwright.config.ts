@@ -8,5 +8,5 @@ export default defineConfig({
   ...shared,
   workers: 1,
   fullyParallel: true,
-  testIgnore: /latency\.spec\.ts/,
+  testIgnore: /(?:latency|multiplayer4-soak)\.spec\.ts/,
 });

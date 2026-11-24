@@ -79,6 +79,8 @@ export class Lockstep {
   /** Checksum after each sync-check turn (every `SYNC_INTERVAL_TURNS`th), by turn number. */
   readonly hashes = new Map<number, number>();
   private lastHash = 0;
+  /** Resent on rejoin if the result vote was lost with the previous socket. */
+  private lastResult: Extract<ClientMessage, { t: 'result' }> | undefined;
   /** Called after each executed turn, with the latest sync-check turn's checksum. */
   onTurn: (turn: number, hash: number) => void = () => {};
   /** Called with each sender's commands for `turn` (player number, as issued) before the step that runs them. */
@@ -190,6 +192,7 @@ export class Lockstep {
       } else if (m.t === 'rejoined') {
         // The batches sent while the socket was down never arrived.
         for (const [turn, batch] of [...this.unreleased].sort((a, b) => a[0] - b[0])) if (turn >= m.nextTurn) link.send(batch);
+        if (this.lastResult) link.send(this.lastResult);
         const wasPaused = this.pause.paused;
         this.pause.applySnapshot(m);
         this.resumeForResign();
@@ -221,7 +224,8 @@ export class Lockstep {
         this.onDesync(m.turn, m.hashes);
       } else if (m.t === 'ended') {
         this.stop();
-        this.onEnded(m.reason);
+        // The sim already owns the results UI. A successful agreement only ends transport.
+        if (m.reason !== 'completed') this.onEnded(m.reason);
       } else if (m.t === 'error') {
         if (PAUSE_ERROR_CODES.has(m.code)) this.pause.clearPending();
       }
@@ -390,6 +394,12 @@ export class Lockstep {
     if (turn >= this.received) this.unreleased.set(turn, batch);
     this.link.send(batch);
     this.pending = [];
+    const result = this.world.gameResult();
+    if (result) {
+      // Repeat each turn: votes lost during a reconnect or a quorum change must converge again.
+      this.lastResult = { t: 'result', turn, hash: this.world.syncChecksum(), winners: result.winners };
+      this.link.send(this.lastResult);
+    }
     this.onTurn(turn, this.lastHash);
   }
 

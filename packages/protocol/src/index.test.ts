@@ -121,7 +121,7 @@ describe('client message decoding', () => {
     ['rejoin without token', JSON.stringify({ t: 'rejoin', code: 'ABCD2', slot: 0, received: 0 })],
     ['empty chat', JSON.stringify({ t: 'chat', text: '', to: [1] })],
     ['chat past 255 characters', JSON.stringify({ t: 'chat', text: 'x'.repeat(256), to: [1] })],
-    ['chat to slot 2', JSON.stringify({ t: 'chat', text: 'hi', to: [2] })],
+    ['chat to slot 4', JSON.stringify({ t: 'chat', text: 'hi', to: [4] })],
     ['chat without recipients', JSON.stringify({ t: 'chat', text: 'hi' })],
     ['rejoin with negative received', JSON.stringify({ t: 'rejoin', code: 'ABCD2', slot: 0, token: 'a', received: -1 })],
     ['create with invalid mode', JSON.stringify({ t: 'create', name: 'Eric', mode: 'solo' })],

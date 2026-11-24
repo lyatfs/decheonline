@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Multiplayer4 agent result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "worker_id",
+    "task_id",
+    "status",
+    "base_commit",
+    "contract_version",
+    "summary",
+    "changed_files",
+    "red_test_evidence",
+    "verification",
+    "covered_test_ids",
+    "limitations",
+    "next_action"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "pattern": "^M(0[0-9]|1[0-4])$"
+    },
+    "status": {
+      "enum": [
+        "REVIEW",
+        "BLOCKED"
+      ]
+    },
+    "base_commit": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{7,40}$"
+    },
+    "contract_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "changed_files": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "diff_reference": {
+      "type": "string"
+    },
+    "red_test_evidence": {
+      "type": "string",
+      "minLength": 1
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command",
+          "cwd",
+          "exit_code",
+          "passed",
+          "failed",
+          "skipped",
+          "artifact",
+          "test_ids",
+          "kind"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "passed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "failed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "skipped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "artifact": {
+            "type": "string",
+            "minLength": 1
+          },
+          "test_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z][0-9]{2}$"
+            }
+          },
+          "kind": {
+            "enum": [
+              "static",
+              "unit",
+              "integration",
+              "e2e",
+              "soak",
+              "manual"
+            ]
+          }
+        }
+      }
+    },
+    "covered_test_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][0-9]{2}$"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "next_action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seed": {
+      "type": [
+        "string",
+        "number",
+        "null"
+      ]
+    },
+    "environment": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "worker_id": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "REVIEW"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "diff_reference"
+        ],
+        "properties": {
+          "verification": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ]
+}

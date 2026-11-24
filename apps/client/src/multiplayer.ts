@@ -1,17 +1,20 @@
 import type { Application } from 'pixi.js';
-import { ATTR_FOOD, ATTR_GOLD, ATTR_HEADROOM, ATTR_POPULATION, ATTR_POPULATION_LIMIT, ATTR_STONE, ATTR_WOOD, HOUSE, MARKET, TECH_DONE, TOWN_CENTER, WONDER, type Command, type GameResult, type Score, type World } from '@aoe/sim';
+import type { CompatibilityVersions, MatchManifest, PlayerInfo, RoomMode, RoomSeat, Slot } from '@aoe/protocol';
+import { ATTR_FOOD, ATTR_GOLD, ATTR_HEADROOM, ATTR_POPULATION, ATTR_POPULATION_LIMIT, ATTR_STONE, ATTR_WOOD, CIV_EGYPTIAN, HOUSE, MARKET, TECH_DONE, TOWN_CENTER, WONDER, type Command, type GameResult, type Score, type World } from '@aoe/sim';
 import { createAssetProvider } from './assets';
 import { GameSounds, type SoundTrigger } from './audio/game-sounds';
 import { MusicPlayer } from './audio/music-player';
 import { SoundPlayer } from './audio/sound-player';
-import { Lockstep, SYNC_INTERVAL_TURNS, showEndDialog } from './lockstep';
+import { Lockstep, SYNC_INTERVAL_TURNS, showEndDialog, type LockstepStart } from './lockstep';
 import { FrameClock } from './lockstep/frame-clock';
-import { LobbyView, Session } from './lobby';
+import { LobbyView, Session, type LobbyState, type StartMessage } from './lobby';
+import { copyInviteUrl, inviteUrl, isLocalhostOrigin, parseInviteRoom } from './lobby/invite-link';
 import { exposeMapDebug, MapView } from './map';
 import { constructionProgress, researchStatus, trainingStatus } from './hud/commands';
 import { GameHud } from './hud/game-hud';
 import { resourcesOf, type Resources } from './hud/resource-bar';
 import { connect, type Link } from './net/link';
+import { getClientVersions, verifyVersionGate, type VersionGateResult } from './net/version-gate';
 import { isBuildingObject, isUnit, UnitLayer, type Ghost } from './units/unit-layer';
 import { placeNavalStart } from './naval-start';
 
@@ -126,6 +129,30 @@ export interface NetDebug {
   baseTime(): number;
   /** The relay's report that the two games' hashes differ at `turn`; null while they agree. `hashes` is by slot. */
   desync(): { turn: number; hashes: number[] } | null;
+  /** Authoritative match manifest frozen at game start (no tokens), or null on legacy starts. */
+  manifest(): MatchManifest | null;
+  /** Player names indexed 1..capacity (`names[0] === ''`), never compacted on drop/resign. */
+  names(): string[];
+  /** Sorted sim player IDs (1..capacity) currently marked dropped. */
+  droppedPlayers(): number[];
+  /** Authoritative protocol slot of this client. */
+  slot(): number;
+  /** Authoritative room mode (`'multiplayer'` | `'single-player'`). */
+  mode(): RoomMode;
+}
+
+/** What `?debug=net` exposes as `window.__lobby`, without leaking `token` or `botToken`. */
+export interface LobbyDebug {
+  phase(): LobbyState['phase'];
+  code(): string;
+  you(): number;
+  capacity(): number;
+  hostSlot(): number;
+  mode(): RoomMode;
+  players(): PlayerInfo[];
+  seats(): RoomSeat[];
+  versions(): CompatibilityVersions | null;
+  error(): { code: string; message: string } | null;
 }
 
 export interface DebugMusic {
@@ -222,6 +249,7 @@ export interface DebugUnit {
 declare global {
   interface Window {
     __game?: NetDebug;
+    __lobby?: LobbyDebug;
   }
 }
 
@@ -292,8 +320,184 @@ export interface MultiplayerOptions {
    * disagree from turn N + 1: the soak test's check that a desync is caught. Only one client passes it.
    */
   perturb?: number;
+  /** Optional room code parsed from the invite URL (`?room=CODE`). */
+  initialRoomCode?: string;
+  /** Builds a shareable invite URL for `code`, or null when invalid. */
+  buildInviteUrl?: (code: string) => string | null;
+  /** Copies an invite URL using clipboard API or manual selection fallback. */
+  copyInvite?: (url: string) => Promise<{ copied: boolean; method: string } | boolean>;
+  /** Checks whether `origin` is a localhost/loopback origin not shareable across devices. */
+  isLocalOrigin?: (origin: string) => boolean;
+  /** Client compatibility versions compared against `/api/versions`. */
+  clientVersions?: CompatibilityVersions;
+  /** Base URL for `/api/versions` (defaults to same-origin). */
+  versionBaseUrl?: string;
+  /** Allows legacy/offline test harnesses without `/api/versions` to fall back to `DEFAULT_COMPATIBILITY_VERSIONS`. */
+  allowVersionFallback?: boolean;
+  /** Optional dependency override for tests. */
+  connectLink?: () => Promise<Link>;
+  /** Optional fetch implementation override for tests. */
+  fetchImpl?: typeof fetch;
   /** Show or hide the game canvas: hidden in the lobby, shown while a game runs. */
   setGameVisible(visible: boolean): void;
+}
+
+export interface ResolvedMatchStart {
+  lockstepStart: LockstepStart;
+  /** Player names indexed `1..capacity` (`names[0] === ''`), never compacted on drop/resign. */
+  names: string[];
+  /** Safe cloned manifest without tokens, or null for legacy capacity-2 starts without a manifest. */
+  manifest: MatchManifest | null;
+}
+
+/**
+ * Resolves `LockstepStart` and `GameHud` names from a server `start` message.
+ * Consumes `start.manifest` when present (preserving slot ordering and fixed 1..capacity arrays),
+ * falling back cleanly to legacy `start.players` / `start.settings` / `start.seed` for capacity-2 fixtures.
+ */
+export function resolveMatchStart(
+  start: StartMessage,
+  you: Slot,
+  roomCode: string,
+  overrides?: { debug?: boolean; seed?: number; testMap?: boolean },
+): ResolvedMatchStart {
+  const seed = overrides?.debug && overrides.seed !== undefined
+    ? overrides.seed
+    : (start.manifest ? start.manifest.seed : start.seed);
+  const testMap = Boolean(overrides?.debug && overrides.testMap);
+
+  if (start.manifest) {
+    const manifest = start.manifest;
+    const sortedPlayers = [...manifest.players].sort((a, b) => a.slot - b.slot);
+    const capacity = manifest.capacity;
+    const civs = Array.from({ length: capacity }, (_, slot) => {
+      const entry = sortedPlayers.find((p) => p.slot === slot);
+      return entry ? entry.civ : CIV_EGYPTIAN;
+    });
+    const names = Array.from({ length: capacity + 1 }, () => '');
+    for (const p of sortedPlayers) {
+      if (p.playerId >= 1 && p.playerId <= capacity) {
+        names[p.playerId] = p.name;
+      }
+    }
+    const manifestCopy: MatchManifest = {
+      code: manifest.code,
+      capacity: manifest.capacity,
+      mode: manifest.mode,
+      hostSlot: manifest.hostSlot,
+      players: sortedPlayers.map((p) => ({ slot: p.slot, playerId: p.playerId, name: p.name, civ: p.civ })),
+      seed: manifest.seed,
+      settings: structuredClone(manifest.settings),
+      versions: { ...manifest.versions },
+    };
+    return {
+      lockstepStart: {
+        seed,
+        commandDelay: start.commandDelay,
+        playerCount: capacity,
+        mode: manifest.mode,
+        slot: you,
+        settings: manifest.settings,
+        civs,
+        rejoin: { code: manifest.code || roomCode, slot: you, token: start.token },
+        testMap,
+      },
+      names,
+      manifest: manifestCopy,
+    };
+  }
+
+  const sortedLegacy = [...start.players].sort((a, b) => a.slot - b.slot);
+  const capacity = start.capacity ?? sortedLegacy.length;
+  const civs = sortedLegacy.map((p) => p.civ);
+  const names = Array.from({ length: Math.max(capacity, sortedLegacy.length) + 1 }, () => '');
+  for (const p of sortedLegacy) {
+    names[p.slot + 1] = p.name;
+  }
+  return {
+    lockstepStart: {
+      seed,
+      commandDelay: start.commandDelay,
+      playerCount: capacity,
+      mode: start.mode,
+      slot: you,
+      settings: start.settings,
+      civs,
+      rejoin: { code: roomCode, slot: you, token: start.token },
+      testMap,
+    },
+    names,
+    manifest: null,
+  };
+}
+
+/** Exposes non-secret lobby state for `?debug=net` tests without exposing `token` or `botToken`. */
+export function createLobbyDebug(session: Session): LobbyDebug {
+  return {
+    phase: () => session.state.phase,
+    code: () => session.state.code,
+    you: () => session.state.you,
+    capacity: () => session.state.capacity ?? Math.max(2, session.state.players.length),
+    hostSlot: () => session.state.hostSlot ?? 0,
+    mode: () => session.state.mode ?? 'multiplayer',
+    players: () => session.state.players.map((p) => ({ slot: p.slot, name: p.name, ready: p.ready, civ: p.civ })),
+    seats: () => (session.state.seats ?? []).map((s) => ({ slot: s.slot, status: s.status, name: s.name, civ: s.civ, ready: s.ready })),
+    versions: () => (session.state.versions ? { ...session.state.versions } : null),
+    error: () => (session.state.error ? { code: session.state.error.code, message: session.state.error.message } : null),
+  };
+}
+
+export function renderVersionGateError(
+  host: HTMLElement,
+  failure: Exclude<VersionGateResult, { ok: true }> | { ok: false; kind: 'connection'; message: string },
+  onRetry: () => void,
+): HTMLElement {
+  const section = document.createElement('section');
+  section.id = 'lobby';
+  section.dataset.testid = 'version-gate';
+
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+
+  const heading = document.createElement('h2');
+  heading.textContent = failure.kind === 'mismatch' ? 'Game Version Mismatch' : 'Server Connection Error';
+
+  const alert = document.createElement('p');
+  alert.className = 'error';
+  alert.setAttribute('role', 'alert');
+  alert.dataset.testid = 'version-gate-error';
+  alert.textContent = failure.message;
+
+  panel.append(heading, alert);
+
+  if (failure.kind === 'mismatch' && failure.diagnostics.mismatches.length > 0) {
+    const details = document.createElement('ul');
+    details.className = 'players';
+    details.dataset.testid = 'version-gate-details';
+    for (const m of failure.diagnostics.mismatches) {
+      const item = document.createElement('li');
+      item.textContent = `${m.field}: client "${m.client}" vs server "${m.server}"`;
+      details.append(item);
+    }
+    panel.append(details);
+  }
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  const retry = document.createElement('button');
+  retry.className = 'primary';
+  retry.dataset.testid = 'version-gate-retry';
+  retry.textContent = 'Retry';
+  retry.addEventListener('click', () => {
+    retry.disabled = true;
+    onRetry();
+  });
+  row.append(retry);
+  panel.append(row);
+
+  section.append(panel);
+  host.replaceChildren(section);
+  return section;
 }
 
 // Master ids (empires.dat): Villager, Bowman.
@@ -306,98 +510,177 @@ const RUIN = 158;
 /** `PLAYER_ATTRIBUTE_CURRENT_AGE`. */
 const ATTR_CURRENT_AGE = 6;
 
-/** Connects to the relay, shows the lobby in `host`, and runs lockstep once the game starts, drawing the map in `app`. */
-export async function startMultiplayer(host: HTMLElement, app: Application, { debug, speed, resources, bowmen, market, houses, relics, ruins, wonder, buildings, units: startUnits, naval, testMap, seed, perturb, setGameVisible }: MultiplayerOptions): Promise<void> {
-  const link = await connect();
-  const session = new Session(link);
-  const view = new LobbyView(session, { testMap: debug && testMap, speed });
-  host.append(view.root);
-  // The setup screen's names (civs, maps, victory) from the pack's language strings once it loads.
-  // Made before the lobby so its clicks start the audio (browsers allow it only after a gesture).
-  const audio = new SoundPlayer();
-  const music = new MusicPlayer(audio);
-  void createAssetProvider().then((provider) => {
-    view.setText((id, fallback) => provider.string(id) ?? fallback);
-    // `start_menu`: open.mid once as the menu opens (src/tribegam.cpp:1360-1368).
-    music.setTable(provider.soundTable()?.music ?? null);
-    music.playFile('open.mid', false);
-  });
+/** Connects to the relay, verifies compatibility versions, shows the lobby in `host`, and runs lockstep once the game starts, drawing the map in `app`. */
+export async function startMultiplayer(
+  host: HTMLElement,
+  app: Application,
+  {
+    debug,
+    speed,
+    resources,
+    bowmen,
+    market,
+    houses,
+    relics,
+    ruins,
+    wonder,
+    buildings,
+    units: startUnits,
+    naval,
+    testMap,
+    seed,
+    perturb,
+    initialRoomCode,
+    buildInviteUrl,
+    copyInvite,
+    isLocalOrigin,
+    clientVersions,
+    versionBaseUrl,
+    allowVersionFallback,
+    connectLink,
+    fetchImpl,
+    setGameVisible,
+  }: MultiplayerOptions,
+): Promise<void> {
+  const defaultOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const resolvedInitialRoomCode =
+    initialRoomCode ?? (typeof window !== 'undefined' ? parseInviteRoom(window.location.href) ?? undefined : undefined);
+  const resolvedBuildInviteUrl =
+    buildInviteUrl ??
+    (defaultOrigin
+      ? (code: string) => {
+          try {
+            return inviteUrl(defaultOrigin, code);
+          } catch {
+            return null;
+          }
+        }
+      : undefined);
+  const resolvedCopyInvite = copyInvite ?? ((url: string) => copyInviteUrl(url));
+  const resolvedIsLocalOrigin = isLocalOrigin ?? ((origin: string) => isLocalhostOrigin(origin));
 
-  let lockstep: Lockstep | undefined;
-  let panel: HTMLElement | undefined;
-  let mapView: MapView | undefined;
-  let units: UnitLayer | undefined;
-  let hud: GameHud | undefined;
-  let sounds: GameSounds | undefined;
-  const soundTick = () => {
-    sounds?.update();
-    // `handle_terrain_sound` runs in the game, not in its game over mode.
-    if (sounds && mapView && !hud?.gameOver.over) sounds.terrain(performance.now(), () => mapView!.drawnTerrains());
-    audio.sample();
-    music.sample();
-  };
-  app.ticker.add(soundTick);
-  // The game screen's chat: a message from another player, outside the turns (docs/spec/chat.md §3). The lobby's
-  // goes to the session.
-  link.onMessage((m) => {
-    if (m.t === 'chat' && session.state.phase === 'playing') hud?.receiveChat(m.from + 1, m.text);
-  });
-
-  // Back to the lobby: the game screen goes, the session leaves its room.
-  const teardown = () => {
-    lockstep?.stop();
-    lockstep = undefined;
-    panel?.remove();
-    units?.destroy();
-    units = undefined;
-    hud?.destroy();
-    hud = undefined;
-    sounds = undefined;
-    audio.stopStream();
-    // Back at the menu, which plays open.mid again (`started_menu_music` was reset as the game started).
-    music.playFile('open.mid', false);
-    mapView?.destroy();
-    mapView = undefined;
-    window.__game = undefined;
-    window.__map = undefined;
-    setGameVisible(false);
-    session.finish();
-  };
-  const end = (kind: 'desync' | 'peer-left', detail: string) => {
-    teardown();
-    showEndDialog(kind, detail, () => undefined);
-  };
-
-  // Mean frame time the server tunes the step size to (docs/spec/turn-timing.md §3.2).
-  const frames = new FrameClock();
-  app.ticker.add((ticker) => frames.sample(ticker.elapsedMS));
-
-  session.onStart = (start, you) => {
-    const player = you + 1;
-    const game = new Lockstep({
-      link,
-      speed,
-      // A broken socket comes back to the same room and slot (docs/spec/turn-timing.md §9).
-      start: {
-        seed: debug && seed !== undefined ? seed : start.seed,
-        commandDelay: start.commandDelay,
-        playerCount: start.players.length,
-        mode: start.mode,
-        slot: you,
-        settings: start.settings,
-        civs: start.players.map((p) => p.civ),
-        rejoin: { code: session.state.code, slot: you, token: start.token },
-        testMap: debug && testMap,
-      },
-      frameMs: () => frames.average(),
+  const boot = async (): Promise<void> => {
+    const gate = await verifyVersionGate({
+      baseUrl: versionBaseUrl,
+      clientVersions: clientVersions ?? getClientVersions(),
+      fallbackToDefault: allowVersionFallback,
+      fetchImpl,
     });
-    // Player names by player number (slot + 1), as the score and the achievements show them.
-    const names = [''];
-    for (const p of start.players) names[p.slot + 1] = p.name;
-    const dropped = new Set<number>();
-    game.onDropped = (slot) => dropped.add(slot + 1);
-    game.onNotResponding = () => hud?.notResponding();
-    lockstep = game;
+    if (!gate.ok) {
+      renderVersionGateError(host, gate, () => {
+        void boot();
+      });
+      return;
+    }
+
+    let link: Link;
+    try {
+      link = await (connectLink ? connectLink() : connect());
+    } catch (err) {
+      renderVersionGateError(
+        host,
+        {
+          ok: false,
+          kind: 'connection',
+          message: err instanceof Error ? err.message : 'Cannot reach the game server.',
+        },
+        () => {
+          void boot();
+        },
+      );
+      return;
+    }
+
+    const session = new Session(link);
+    session.setVersions(gate.clientVersions);
+    if (debug) window.__lobby = createLobbyDebug(session);
+
+    const view = new LobbyView(session, {
+      testMap: debug && testMap,
+      speed,
+      initialRoomCode: resolvedInitialRoomCode,
+      buildInviteUrl: resolvedBuildInviteUrl,
+      copyInvite: resolvedCopyInvite,
+      isLocalOrigin: resolvedIsLocalOrigin,
+      versions: gate.clientVersions,
+    });
+    host.replaceChildren(view.root);
+    // The setup screen's names (civs, maps, victory) from the pack's language strings once it loads.
+    // Made before the lobby so its clicks start the audio (browsers allow it only after a gesture).
+    const audio = new SoundPlayer();
+    const music = new MusicPlayer(audio);
+    void createAssetProvider().then((provider) => {
+      view.setText((id, fallback) => provider.string(id) ?? fallback);
+      // `start_menu`: open.mid once as the menu opens (src/tribegam.cpp:1360-1368).
+      music.setTable(provider.soundTable()?.music ?? null);
+      music.playFile('open.mid', false);
+    });
+
+    let lockstep: Lockstep | undefined;
+    let panel: HTMLElement | undefined;
+    let mapView: MapView | undefined;
+    let units: UnitLayer | undefined;
+    let hud: GameHud | undefined;
+    let sounds: GameSounds | undefined;
+    const soundTick = () => {
+      sounds?.update();
+      // `handle_terrain_sound` runs in the game, not in its game over mode.
+      if (sounds && mapView && !hud?.gameOver.over) sounds.terrain(performance.now(), () => mapView!.drawnTerrains());
+      audio.sample();
+      music.sample();
+    };
+    app.ticker.add(soundTick);
+    // The game screen's chat: a message from another player, outside the turns (docs/spec/chat.md §3). The lobby's
+    // goes to the session.
+    link.onMessage((m) => {
+      if (m.t === 'chat' && session.state.phase === 'playing') hud?.receiveChat(m.from + 1, m.text);
+    });
+
+    // Back to the lobby: the game screen goes, the session leaves its room.
+    const teardown = () => {
+      lockstep?.stop();
+      lockstep = undefined;
+      panel?.remove();
+      units?.destroy();
+      units = undefined;
+      hud?.destroy();
+      hud = undefined;
+      sounds = undefined;
+      audio.stopStream();
+      // Back at the menu, which plays open.mid again (`started_menu_music` was reset as the game started).
+      music.playFile('open.mid', false);
+      mapView?.destroy();
+      mapView = undefined;
+      window.__game = undefined;
+      window.__map = undefined;
+      setGameVisible(false);
+      session.finish();
+    };
+    const end = (kind: 'desync' | 'peer-left', detail: string) => {
+      teardown();
+      showEndDialog(kind, detail, () => undefined);
+    };
+
+    // Mean frame time the server tunes the step size to (docs/spec/turn-timing.md §3.2).
+    const frames = new FrameClock();
+    app.ticker.add((ticker) => frames.sample(ticker.elapsedMS));
+
+    session.onStart = (start, you) => {
+      const player = you + 1;
+      const resolved = resolveMatchStart(start, you, session.state.code, { debug, seed, testMap });
+      const game = new Lockstep({
+        link,
+        speed,
+        // A broken socket comes back to the same room and slot (docs/spec/turn-timing.md §9).
+        start: resolved.lockstepStart,
+        frameMs: () => frames.average(),
+      });
+      // Player names indexed 1..capacity (Gaia at 0), never compacted when a player drops or resigns.
+      const names = resolved.names;
+      const dropped = new Set<number>();
+      game.onDropped = (slot) => dropped.add(slot + 1);
+      game.onNotResponding = () => hud?.notResponding();
+      lockstep = game;
     // Before the first turn runs: the relay releases turns asynchronously.
     if (debug && resources !== undefined) {
       for (const a of game.world.attributes.slice(1)) for (const r of [ATTR_FOOD, ATTR_WOOD, ATTR_GOLD, ATTR_STONE]) a[r] = resources;
@@ -461,7 +744,7 @@ export async function startMultiplayer(host: HTMLElement, app: Application, { de
       levels: () => ({ running: audio.running, sound: audio.level(), music: music.level() }),
       music: () => ({ playing: music.playing, on: music.on, volume: music.volume, tracks: music.tracks }),
     };
-    if (debug) panel = debugPanel(host, game, link, player, () => units, () => hud, () => sounds, frames, audioDebug);
+    if (debug) panel = debugPanel(host, game, link, player, () => units, () => hud, () => sounds, frames, audioDebug, resolved.manifest, names, dropped);
     if (debug && perturb !== undefined) {
       const shown = game.onTurn;
       game.onTurn = (turn, hash) => {
@@ -550,7 +833,10 @@ export async function startMultiplayer(host: HTMLElement, app: Application, { de
       }
       if (debug) exposeMapDebug(view);
     });
+    };
   };
+
+  await boot();
 }
 
 function debugPanel(
@@ -563,6 +849,9 @@ function debugPanel(
   sounds: () => GameSounds | undefined,
   frames: FrameClock,
   audio: AudioDebug,
+  manifest: MatchManifest | null,
+  names: readonly string[],
+  dropped: ReadonlySet<number>,
 ): HTMLElement {
   const panel = document.createElement('div');
   panel.dataset.testid = 'net-debug';
@@ -712,6 +1001,11 @@ function debugPanel(
     gameTime: () => game.world.worldTime,
     baseTime: () => game.baseTime,
     desync: () => desync,
+    manifest: () => (manifest ? structuredClone(manifest) : null),
+    names: () => [...names],
+    droppedPlayers: () => [...dropped].sort((a, b) => a - b),
+    slot: () => game.slot,
+    mode: () => game.mode,
   };
   return panel;
 }

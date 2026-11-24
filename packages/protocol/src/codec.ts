@@ -1,12 +1,15 @@
 import { isLobbyCiv, isLobbySettings, parseCommand } from '@aoe/sim';
 import {
   isBotDifficulty,
+  isCompatibilityVersions,
+  isRoomCapacity,
   isRoomMode,
   MAX_CHAT_LENGTH,
   MAX_COMMANDS_PER_BATCH,
   MAX_NAME_LENGTH,
   MAX_PLAYERS,
   type ClientMessage,
+  type CompatibilityVersions,
   type Command,
   type GameSettings,
   type ServerMessage,
@@ -24,6 +27,21 @@ function isObj(v: unknown): v is Obj {
 
 function isTurn(v: unknown): v is number {
   return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
+}
+
+function isSlot(v: unknown): v is number {
+  return isTurn(v) && v < MAX_PLAYERS;
+}
+
+function isHash(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 0xffffffff;
+}
+
+/** Return only the handshake's public identifiers. */
+function parseVersions(v: unknown): CompatibilityVersions | null {
+  if (!isCompatibilityVersions(v)) return null;
+  const { protocol, rules, build, assets } = v;
+  return { protocol, rules, build, assets };
 }
 
 function cleanName(v: unknown): string | null {
@@ -78,6 +96,10 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
       if (name === null) return fail('bad name');
       const modeRaw = v['mode'];
       if (modeRaw !== undefined && !isRoomMode(modeRaw)) return fail('bad room mode');
+      const capacity = v['capacity'];
+      if (capacity !== undefined && (!isRoomCapacity(capacity) || (modeRaw === 'single-player' && capacity !== 2))) return fail('bad room capacity');
+      const versions = v['versions'] === undefined ? undefined : parseVersions(v['versions']);
+      if (versions === null) return fail('bad versions');
       const diffRaw = v['difficulty'];
       if (diffRaw !== undefined && !isBotDifficulty(diffRaw)) return fail('bad difficulty');
       return {
@@ -86,6 +108,8 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
           t: 'create',
           name,
           ...(modeRaw !== undefined ? { mode: modeRaw } : {}),
+          ...(capacity !== undefined ? { capacity } : {}),
+          ...(versions !== undefined ? { versions } : {}),
           ...(modeRaw === 'single-player' && diffRaw !== undefined ? { difficulty: diffRaw } : {}),
         },
       };
@@ -94,6 +118,8 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
       const name = cleanName(v['name']);
       if (name === null) return fail('bad name');
       if (typeof v['code'] !== 'string' || v['code'].length > 32) return fail('bad code');
+      const versions = v['versions'] === undefined ? undefined : parseVersions(v['versions']);
+      if (versions === null) return fail('bad versions');
       const botToken = v['botToken'];
       if (botToken !== undefined && (typeof botToken !== 'string' || botToken.length > 64)) return fail('bad bot token');
       return {
@@ -103,12 +129,16 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
           code: v['code'],
           name,
           ...(botToken !== undefined ? { botToken } : {}),
+          ...(versions !== undefined ? { versions } : {}),
         },
       };
     }
-    case 'ready':
+    case 'ready': {
       if (typeof v['ready'] !== 'boolean') return fail('bad ready flag');
-      return { ok: true, message: { t: 'ready', ready: v['ready'] } };
+      const versions = v['versions'] === undefined ? undefined : parseVersions(v['versions']);
+      if (versions === null) return fail('bad versions');
+      return { ok: true, message: { t: 'ready', ready: v['ready'], ...(versions !== undefined ? { versions } : {}) } };
+    }
     case 'settings': {
       const s = parseLobbySettings(v['settings']);
       if (s === null) return fail('bad settings');
@@ -126,7 +156,7 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
     case 'rejoin': {
       const { code, slot, token, received } = v;
       if (typeof code !== 'string' || code.length > 32 || typeof token !== 'string' || token.length > 64) return fail('bad rejoin');
-      if (!isTurn(slot) || !isTurn(received)) return fail('bad rejoin');
+      if (!isSlot(slot) || !isTurn(received)) return fail('bad rejoin');
       return { ok: true, message: { t: 'rejoin', code, slot, token, received } };
     }
     case 'turn': {
@@ -140,7 +170,7 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
     case 'chat': {
       const { text, to } = v;
       if (typeof text !== 'string' || text.length === 0 || text.length > MAX_CHAT_LENGTH) return fail('bad chat text');
-      if (!Array.isArray(to) || to.length > MAX_PLAYERS || !to.every((s) => isTurn(s) && s < MAX_PLAYERS)) return fail('bad chat recipients');
+      if (!Array.isArray(to) || to.length > MAX_PLAYERS || !to.every(isSlot)) return fail('bad chat recipients');
       return { ok: true, message: { t: 'chat', text, to: to as number[] } };
     }
     case 'pong':
@@ -148,10 +178,18 @@ export function decodeClientMessage(raw: string): Decoded<ClientMessage> {
       return { ok: true, message: { t: 'pong', n: v['n'] } };
     case 'hash': {
       const h = v['hash'];
-      if (!isTurn(v['turn']) || typeof h !== 'number' || !Number.isInteger(h) || h < 0 || h > 0xffffffff) {
+      if (!isTurn(v['turn']) || !isHash(h)) {
         return fail('bad hash report');
       }
       return { ok: true, message: { t: 'hash', turn: v['turn'], hash: h } };
+    }
+    case 'result': {
+      const { turn, hash, winners } = v;
+      if (!isTurn(turn) || !isHash(hash) || !Array.isArray(winners) || winners.length > MAX_PLAYERS ||
+          !winners.every((p) => isTurn(p) && p >= 1 && p <= MAX_PLAYERS) || new Set(winners).size !== winners.length) {
+        return fail('bad result report');
+      }
+      return { ok: true, message: { t: 'result', turn, hash, winners: winners as number[] } };
     }
     case 'pause': {
       if (typeof v['paused'] !== 'boolean') return fail('bad pause flag');

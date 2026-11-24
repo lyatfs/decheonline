@@ -265,8 +265,8 @@ export function startingObjects(players: number): StartUnit[] {
 const BASES = [
   [10, 10],
   [30, 30],
-  [10, 40],
-  [40, 8],
+  [8, 36],
+  [36, 8],
 ];
 
 /** Plain JSON-safe copy of the whole simulation state, taken between turns. */

@@ -177,13 +177,13 @@ export class ScoreDisplay {
     });
   }
 
-  /** The icons of `lines`' players and a key of them with the dropped players. */
+  /** The icons of `lines`' players and a key of them with the dropped/struck players. */
   private netState(lines: readonly ScoreLine[]): { icons: Map<number, [number, number]> | null; key: string } {
     const net = this.net;
     const status = net?.status();
-    if (!net || !status) return { icons: null, key: '' };
+    if (!net || !status) return { icons: null, key: lines.map((l) => `${l.player}:${l.struck ? 1 : 0}`).join(' ') };
     const icons = netIcons(lines.map((l) => l.player), net.player, status.rtt, status.frameMs, (p) => !net.dropped(p));
-    const key = lines.map((l) => `${l.player}:${icons.get(l.player)?.join(',') ?? ''}:${net.dropped(l.player) ? 1 : 0}`).join(' ');
+    const key = lines.map((l) => `${l.player}:${icons.get(l.player)?.join(',') ?? ''}:${net.dropped(l.player) ? 1 : 0}:${l.struck ? 1 : 0}`).join(' ');
     return { icons, key };
   }
 
